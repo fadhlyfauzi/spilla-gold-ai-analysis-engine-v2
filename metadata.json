@@ -1,0 +1,8 @@
+{
+  "name": "kedua final spilla gold",
+  "description": "Professional XAUUSD (Gold) trading analysis engine powered by fundamental, technical, sentiment, risk, and AI analysis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
