@@ -10,6 +10,7 @@ import {
   CopilotExecutionResponse,
   TradingStyle,
   TradeExecutionOrder,
+  CanonicalExecutionParameters,
 } from '../types';
 import { normalizeCentPrice, formatSymbolLabel } from '../utils/priceUtils';
 import {
@@ -71,11 +72,104 @@ export interface SignalHistoryLogItem {
   summary_short: string;
 }
 
+export const createExecutionParametersFromSnapshot = (
+  snap: CopilotTradePlanSnapshot,
+  currentSym: string,
+  style: TradingStyle,
+  tf: string,
+  specDigits: number,
+  fallbackEq: number,
+  fallbackRiskPct: number,
+  fallbackLot: number
+): CanonicalExecutionParameters => {
+  const plan: any = snap.trade_plan || {};
+  const sizing: any = snap.position_sizing || {};
+  const sigId =
+    snap.signal_id ||
+    (snap.trade_plan_id && snap.trade_plan_id.startsWith('SG-')
+      ? snap.trade_plan_id
+      : `SG-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`);
+  const snapId = snap.snapshot_id || snap.trade_plan_id || 'SNAP-LATEST';
+
+  const side: 'BUY' | 'SELL' =
+    snap.direction_bias === 'SELL' ||
+    snap.potential_direction === 'SELL' ||
+    snap.directional_bias === 'BEARISH' ||
+    snap.primary_bias === 'BEARISH' ||
+    snap.macro_direction_h1 === 'BEARISH' ||
+    plan.action === 'SELL' ||
+    snap.action === 'SELL'
+      ? 'SELL'
+      : 'BUY';
+
+  const entry = Number(
+    (plan.entry_price || snap.capturePrice || snap.market_price_at_creation || snap.anchor_price || 0).toFixed(specDigits)
+  );
+  const riskDist = Number(snap.risk_distance || 17.02);
+
+  let sl = plan.stop_loss ? Number(plan.stop_loss) : 0;
+  if (!sl || isNaN(sl)) {
+    sl = side === 'SELL' ? entry + riskDist : entry - riskDist;
+  }
+  sl = Number(sl.toFixed(specDigits));
+
+  let tp1 = plan.take_profit_1 ? Number(plan.take_profit_1) : 0;
+  if (!tp1 || isNaN(tp1)) {
+    tp1 = side === 'SELL' ? entry - riskDist * 1.57 : entry + riskDist * 1.57;
+  }
+  tp1 = Number(tp1.toFixed(specDigits));
+
+  let tp2: number | null = plan.take_profit_2 ? Number(plan.take_profit_2) : null;
+  if (!tp2 || isNaN(tp2)) {
+    tp2 = side === 'SELL' ? entry - riskDist * 2.8 : entry + riskDist * 2.8;
+  }
+  tp2 = Number(tp2.toFixed(specDigits));
+
+  const lot = Number((sizing.normalized_lot ?? fallbackLot ?? 0.10).toFixed(2));
+  const riskPct = Number((sizing.risk_percent ?? fallbackRiskPct ?? 1.0).toFixed(2));
+  const estLoss = Number((sizing.estimated_loss_at_sl ?? (fallbackEq * (riskPct / 100))).toFixed(2));
+  const conf = Number(snap.confidence ?? 85);
+  const rr = Number(plan.risk_reward_ratio ?? 1.57);
+
+  const zone =
+    snap.potential_entry_zone ||
+    snap.planned_entry_zone ||
+    (entry > 0 ? `${(entry - 1.5).toFixed(specDigits)} – ${(entry + 1.5).toFixed(specDigits)}` : '—');
+
+  const mode = snap.entry_mode || 'MARKET';
+
+  return {
+    signalId: sigId,
+    snapshotId: snapId,
+    symbol: currentSym,
+    side,
+    lot,
+    entryPrice: entry,
+    stopLoss: sl,
+    takeProfit1: tp1,
+    takeProfit2: tp2,
+    riskPercent: riskPct,
+    estimatedLoss: estLoss,
+    confidence: conf,
+    tradingStyle: (style || 'INTRADAY') as 'SCALPING' | 'INTRADAY',
+    timeframe: tf,
+    potentialEntryZone: zone,
+    entryMode: mode,
+    stopLossReason: snap.stop_loss_reason,
+    takeProfit1Reason: snap.take_profit_1_reason,
+    takeProfit2Reason: snap.take_profit_2_reason,
+    riskRewardRatio: rr,
+    createdAt: new Date().toISOString(),
+  };
+};
+
 export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
   recommendationData,
   authToken,
   onCreditBalanceChanged,
 }) => {
+  // Canonical Execution Parameters (Single Source of Truth)
+  const [executionParameters, setExecutionParameters] = useState<CanonicalExecutionParameters | null>(null);
   // SPILLA AI Credit State
   const [userCreditBalance, setUserCreditBalance] = useState<number>(25000);
   const [isCreditWalletOpen, setIsCreditWalletOpen] = useState<boolean>(false);
@@ -725,6 +819,17 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
           if (canonicalSnapshot.trade_plan) {
             setActiveTradePlan(canonicalSnapshot.trade_plan);
           }
+          const canonicalParams = createExecutionParametersFromSnapshot(
+            canonicalSnapshot,
+            selectedSymbol,
+            tradingStyle,
+            selectedTimeframe,
+            currentSymbolSpec.digits || 2,
+            accountEquity,
+            riskPercent,
+            fixedLot
+          );
+          setExecutionParameters(canonicalParams);
         }
       }
 
@@ -735,6 +840,7 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
     } catch (err: any) {
       console.error('[LiveAnalysisView] Copilot Analysis error:', err);
       setSnapshot(null);
+      setExecutionParameters(null);
       setCaptureError(err?.message || 'STALE PRICE DETECTED — ANALYSIS CANCELLED');
     } finally {
       isAnalyzingRef.current = false;
@@ -780,6 +886,15 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
           ...snapshot,
           position_sizing: data.positionSizing,
         });
+        setExecutionParameters((prev) => {
+          if (!prev) return null;
+          return {
+            ...prev,
+            lot: Number((data.positionSizing.normalized_lot ?? prev.lot).toFixed(2)),
+            riskPercent: Number((data.positionSizing.risk_percent ?? prev.riskPercent).toFixed(2)),
+            estimatedLoss: Number((data.positionSizing.estimated_loss_at_sl ?? prev.estimatedLoss).toFixed(2)),
+          };
+        });
       }
     } catch (err) {
       console.error('Failed to recalculate position sizing:', err);
@@ -787,6 +902,7 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
   };
 
   const activeSignalId = React.useMemo(() => {
+    if (executionParameters?.signalId) return executionParameters.signalId;
     if (!snapshot) return 'SG-001';
     if (snapshot.signal_id) return snapshot.signal_id;
     if (snapshot.trade_plan_id) {
@@ -798,70 +914,101 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
       return `SG-${snapshot.snapshot_id.slice(-8)}`;
     }
     return `SG-${Date.now().toString().slice(-6)}`;
-  }, [snapshot]);
+  }, [snapshot, executionParameters]);
 
   const isCurrentSignalDispatched = dispatchedSignalIds.includes(activeSignalId) || (dispatchedBanner?.signalId === activeSignalId);
 
   const handleOpenExecution = (actionToExecute: 'BUY' | 'SELL') => {
+    let params = executionParameters;
+    if (!params && snapshot) {
+      params = createExecutionParametersFromSnapshot(
+        snapshot,
+        selectedSymbol,
+        tradingStyle,
+        selectedTimeframe,
+        currentSymbolSpec.digits || 2,
+        accountEquity,
+        riskPercent,
+        fixedLot
+      );
+    }
+    if (params) {
+      if (params.side !== actionToExecute) {
+        const entry = params.entryPrice;
+        const isTargetSell = actionToExecute === 'SELL';
+        const riskDistance = Math.abs(params.stopLoss - entry) || 17.02;
+        const digits = currentSymbolSpec.digits || 2;
+        const newSL = Number((isTargetSell ? entry + riskDistance : entry - riskDistance).toFixed(digits));
+        const newTP1 = Number((isTargetSell ? entry - riskDistance * 1.57 : entry + riskDistance * 1.57).toFixed(digits));
+        const newTP2 = Number((isTargetSell ? entry - riskDistance * 2.8 : entry + riskDistance * 2.8).toFixed(digits));
+
+        params = {
+          ...params,
+          signalId: `SG-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`,
+          side: actionToExecute,
+          stopLoss: newSL,
+          takeProfit1: newTP1,
+          takeProfit2: newTP2,
+        };
+      }
+      setExecutionParameters(params);
+    }
     setExecutingAction(actionToExecute);
     setExecutionResult(null);
     setModalExecutionError(null);
     setShowConfirmModal(true);
   };
 
-  // 6. User Confirmed Order Execution Dispatch (Phase 1 MT5 Execution Bridge)
+  // 6. User Confirmed Order Execution Dispatch (Phase 1 MT5 Execution Bridge - SSOT Grounded)
   const handleExecuteOrder = async () => {
-    if (!snapshot || isExecuting) return;
-    setIsExecuting(true);
-    setModalExecutionError(null);
+    const currentParams = executionParameters || (snapshot ? createExecutionParametersFromSnapshot(
+      snapshot,
+      selectedSymbol,
+      tradingStyle,
+      selectedTimeframe,
+      currentSymbolSpec.digits || 2,
+      accountEquity,
+      riskPercent,
+      fixedLot
+    ) : null);
 
-    // Anti-duplicate local check
-    if (dispatchedSignalIds.includes(activeSignalId)) {
-      setModalExecutionError('DUPLICATE SIGNAL — ORDER ALREADY DISPATCHED');
-      setIsExecuting(false);
+    if (!currentParams || isExecuting) return;
+
+    // Validation: ensure parameters exist and are not duplicated
+    if (!currentParams.signalId || currentParams.entryPrice <= 0) {
+      setModalExecutionError('INVALID EXECUTION PARAMETERS — PLEASE RE-RUN ANALYSIS');
       return;
     }
 
+    if (dispatchedSignalIds.includes(currentParams.signalId)) {
+      setModalExecutionError('DUPLICATE SIGNAL — ORDER ALREADY DISPATCHED');
+      return;
+    }
+
+    setIsExecuting(true);
+    setModalExecutionError(null);
+
     try {
-      const targetAction = executingAction || directionBias || 'BUY';
-      const isTargetSell = targetAction === 'SELL';
-      const orderEntry = entryPrice > 0 ? entryPrice : (snapshot.trade_plan?.entry_price || liveMarketMid);
-      const targetSL =
-        (targetAction === snapshot.action && snapshot.trade_plan?.stop_loss)
-          ? snapshot.trade_plan.stop_loss
-          : (isTargetSell ? orderEntry + riskDist : orderEntry - riskDist);
-      const targetTP1 =
-        (targetAction === snapshot.action && snapshot.trade_plan?.take_profit_1)
-          ? snapshot.trade_plan.take_profit_1
-          : (isTargetSell ? orderEntry - riskDist * 1.57 : orderEntry + riskDist * 1.57);
-      const targetTP2 =
-        (targetAction === snapshot.action && snapshot.trade_plan?.take_profit_2)
-          ? snapshot.trade_plan.take_profit_2
-          : (isTargetSell ? orderEntry - riskDist * 2.5 : orderEntry + riskDist * 2.5);
-
-      const targetLot = snapshot.position_sizing?.normalized_lot || 0.10;
-      const targetRiskPercent = snapshot.position_sizing?.risk_percent || 1.0;
-      const targetEstimatedLoss = Number(snapshot.position_sizing?.estimated_loss_at_sl || 170.20);
-
-      // Phase 1 MT5 Execution Bridge Dispatch Payload (SSOT Immutable Record)
+      const digits = currentSymbolSpec.digits || 2;
+      // Single Source of Truth Payload: passed directly from executionParameters with 0 recalculations
       const orderPayload: Partial<TradeExecutionOrder> = {
-        signalId: activeSignalId,
-        snapshotId: snapshot.snapshot_id || snapshot.trade_plan_id || 'SNAP-LATEST',
+        signalId: currentParams.signalId,
+        snapshotId: currentParams.snapshotId,
         accountId: 'MT5-DEMO-01',
-        symbol: snapshot.symbol || 'XAUUSD',
-        side: targetAction,
+        symbol: currentParams.symbol,
+        side: currentParams.side,
         orderType: 'MARKET',
-        lot: Number(targetLot.toFixed(2)),
-        capturePrice: Number((snapshot.capturePrice || snapshot.market_price_at_creation || orderEntry).toFixed(3)),
-        entryPrice: Number(orderEntry.toFixed(3)),
-        stopLoss: Number(targetSL.toFixed(3)),
-        takeProfit1: Number(targetTP1.toFixed(3)),
-        takeProfit2: targetTP2 ? Number(targetTP2.toFixed(3)) : null,
-        riskPercent: Number(targetRiskPercent.toFixed(2)),
-        estimatedLoss: Number(targetEstimatedLoss.toFixed(2)),
-        confidence: Number(confidence || snapshot.confidence || 80),
-        tradingStyle: (tradingStyle || snapshot.tradingStyle || 'INTRADAY') as 'SCALPING' | 'INTRADAY',
-        timeframe: String(selectedTimeframe || snapshot.timeframe || 'H1'),
+        lot: Number(currentParams.lot.toFixed(2)),
+        capturePrice: Number(currentParams.entryPrice.toFixed(digits)),
+        entryPrice: Number(currentParams.entryPrice.toFixed(digits)),
+        stopLoss: Number(currentParams.stopLoss.toFixed(digits)),
+        takeProfit1: Number(currentParams.takeProfit1.toFixed(digits)),
+        takeProfit2: currentParams.takeProfit2 !== null ? Number(currentParams.takeProfit2.toFixed(digits)) : null,
+        riskPercent: Number(currentParams.riskPercent.toFixed(2)),
+        estimatedLoss: Number(currentParams.estimatedLoss.toFixed(2)),
+        confidence: Number(currentParams.confidence),
+        tradingStyle: currentParams.tradingStyle,
+        timeframe: currentParams.timeframe,
         status: 'PENDING',
         createdAt: new Date().toISOString(),
       };
@@ -879,17 +1026,17 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
         return;
       }
 
-      // Success: Close modal and show "ORDER DISPATCHED ✓" banner
+      // Success: Close modal and show "ORDER DISPATCHED ✓" banner with identical values
       setShowConfirmModal(false);
-      setDispatchedSignalIds((prev) => [...new Set([...prev, activeSignalId])]);
+      setDispatchedSignalIds((prev) => [...new Set([...prev, currentParams.signalId])]);
       setDispatchedBanner({
-        signalId: data.order?.signalId || activeSignalId,
+        signalId: currentParams.signalId,
         status: 'PENDING MT5 EXECUTION',
-        direction: data.order?.side || targetAction,
-        lot: data.order?.lot || targetLot,
-        entry: data.order?.entryPrice || orderEntry,
-        sl: data.order?.stopLoss || targetSL,
-        tp1: data.order?.takeProfit1 || targetTP1,
+        direction: currentParams.side,
+        lot: currentParams.lot,
+        entry: currentParams.entryPrice,
+        sl: currentParams.stopLoss,
+        tp1: currentParams.takeProfit1,
         timestamp: new Date().toLocaleTimeString(),
       });
 
@@ -2211,140 +2358,157 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
       </div>
 
       {/* Confirmation & Execution Modal */}
-      {showConfirmModal && snapshot && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-[#121620] border border-gray-800 rounded-2xl max-w-lg w-full p-6 space-y-5 shadow-2xl">
-            <div className="flex items-center justify-between pb-3 border-b border-gray-800">
-              <div className="flex items-center space-x-2">
-                <ShieldCheck className="w-6 h-6 text-emerald-400" />
-                <h3 className="text-sm font-extrabold text-white tracking-wider">
-                  CONFIRM {executingAction || directionBias} ORDER EXECUTION
-                </h3>
-              </div>
-              <button
-                onClick={() => {
-                  setShowConfirmModal(false);
-                  setExecutionResult(null);
-                  setModalExecutionError(null);
-                }}
-                className="text-gray-400 hover:text-white text-xs cursor-pointer"
-              >
-                ✕ CLOSE
-              </button>
-            </div>
+      {showConfirmModal && (executionParameters || snapshot) && (() => {
+        const params = executionParameters || (snapshot ? createExecutionParametersFromSnapshot(
+          snapshot,
+          selectedSymbol,
+          tradingStyle,
+          selectedTimeframe,
+          currentSymbolSpec.digits || 2,
+          accountEquity,
+          riskPercent,
+          fixedLot
+        ) : null);
 
-            {/* Execution Parameter Review */}
-            <div className="bg-[#0B0E14] p-4 rounded-xl border border-gray-800 space-y-2.5 text-xs">
-              <div className="flex justify-between items-center pb-2 border-b border-gray-800/60">
-                <span className="text-gray-400">Signal ID & Target:</span>
-                <span className="font-mono text-amber-300 font-black text-xs">
-                  {activeSignalId} • {snapshot.symbol}
-                </span>
-              </div>
-              <div className="flex justify-between items-center pb-2 border-b border-gray-800/60">
-                <span className="text-gray-400">Symbol & Action:</span>
-                <span className={`font-black text-sm px-2 py-0.5 rounded ${
-                  (executingAction || directionBias) === 'BUY'
-                    ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                    : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
-                }`}>
-                  {snapshot.symbol} • {executingAction || directionBias}
-                </span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-gray-400">Calculated Volume:</span>
-                <span className="text-blue-400 font-extrabold text-sm">{snapshot.position_sizing?.normalized_lot || 0.10} Lots</span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-gray-400">Entry Level:</span>
-                <span className="text-white font-bold">${entryPrice > 0 ? entryPrice.toFixed(currentSymbolSpec.digits || 2) : (snapshot.trade_plan?.entry_price || liveMarketMid).toFixed(currentSymbolSpec.digits || 2)}</span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-gray-400">Stop Loss:</span>
-                <span className="text-rose-400 font-bold">${(
-                  (executingAction || directionBias) === 'SELL'
-                    ? (entryPrice > 0 ? entryPrice + riskDist : (snapshot.trade_plan?.entry_price || liveMarketMid) + riskDist)
-                    : (entryPrice > 0 ? entryPrice - riskDist : (snapshot.trade_plan?.entry_price || liveMarketMid) - riskDist)
-                ).toFixed(currentSymbolSpec.digits || 2)}</span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-gray-400">Take Profit 1:</span>
-                <span className="text-emerald-400 font-bold">${(
-                  (executingAction || directionBias) === 'SELL'
-                    ? (entryPrice > 0 ? entryPrice - riskDist * 1.57 : (snapshot.trade_plan?.entry_price || liveMarketMid) - riskDist * 1.57)
-                    : (entryPrice > 0 ? entryPrice + riskDist * 1.57 : (snapshot.trade_plan?.entry_price || liveMarketMid) + riskDist * 1.57)
-                ).toFixed(currentSymbolSpec.digits || 2)}</span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-gray-400">Max Estimated Loss at SL:</span>
-                <span className="text-rose-400 font-bold">${snapshot.position_sizing?.estimated_loss_at_sl || '170.20'} ({snapshot.position_sizing?.risk_percent || 1.0}%)</span>
-              </div>
-            </div>
+        if (!params) return null;
 
-            {/* Error Notification Alert in Modal */}
-            {modalExecutionError && (
-              <div className="p-3.5 rounded-xl border border-rose-500/40 bg-rose-500/10 text-rose-300 text-xs space-y-1">
-                <div className="font-extrabold flex items-center gap-1.5 text-rose-400">
-                  <AlertTriangle className="w-4 h-4 text-rose-400" />
-                  ORDER DISPATCH REJECTED
+        return (
+          <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+            <div className="bg-[#121620] border border-gray-800 rounded-2xl max-w-lg w-full p-6 space-y-5 shadow-2xl">
+              <div className="flex items-center justify-between pb-3 border-b border-gray-800">
+                <div className="flex items-center space-x-2">
+                  <ShieldCheck className="w-6 h-6 text-emerald-400" />
+                  <h3 className="text-sm font-extrabold text-white tracking-wider">
+                    CONFIRM {params.side} ORDER EXECUTION
+                  </h3>
                 </div>
-                <p className="text-[11px] leading-relaxed">{modalExecutionError}</p>
-              </div>
-            )}
-
-            {/* Execution Result Notification */}
-            {executionResult && (
-              <div
-                className={`p-3.5 rounded-xl border text-xs space-y-1 ${
-                  executionResult.success
-                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
-                    : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
-                }`}
-              >
-                <div className="font-extrabold flex items-center gap-1.5">
-                  {executionResult.success ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <AlertTriangle className="w-4 h-4 text-rose-400" />}
-                  {executionResult.status}
-                </div>
-                <p className="text-[11px] leading-relaxed">{executionResult.message}</p>
-                {executionResult.mt5_ticket && (
-                  <span className="font-mono text-[10px] text-amber-300 block">
-                    Broker Ticket #{executionResult.mt5_ticket}
-                  </span>
-                )}
-              </div>
-            )}
-
-            {/* Action Buttons */}
-            <div className="flex items-center gap-3 pt-2">
-              <button
-                onClick={() => {
-                  setShowConfirmModal(false);
-                  setExecutionResult(null);
-                  setModalExecutionError(null);
-                }}
-                className="flex-1 py-3 rounded-xl bg-[#0B0E14] hover:bg-gray-800 text-gray-300 font-bold text-xs border border-gray-800 transition-all cursor-pointer"
-              >
-                CANCEL
-              </button>
-
-              {!executionResult?.success && (
                 <button
-                  onClick={handleExecuteOrder}
-                  disabled={isExecuting}
-                  className={`flex-1 py-3 rounded-xl text-black font-extrabold text-xs transition-all flex items-center justify-center gap-2 cursor-pointer shadow-lg disabled:opacity-50 ${
-                    (executingAction || directionBias) === 'BUY'
-                      ? 'bg-emerald-500 hover:bg-emerald-600 shadow-emerald-500/20'
-                      : 'bg-rose-500 hover:bg-rose-600 shadow-rose-500/20'
+                  onClick={() => {
+                    setShowConfirmModal(false);
+                    setExecutionResult(null);
+                    setModalExecutionError(null);
+                  }}
+                  className="text-gray-400 hover:text-white text-xs cursor-pointer"
+                >
+                  ✕ CLOSE
+                </button>
+              </div>
+
+              {/* Execution Parameter Review: 100% Identical to EXECUTION PARAMETERS BREAKDOWN */}
+              <div className="bg-[#0B0E14] p-4 rounded-xl border border-gray-800 space-y-2.5 text-xs">
+                <div className="flex justify-between items-center pb-2 border-b border-gray-800/60">
+                  <span className="text-gray-400">Signal ID:</span>
+                  <span className="font-mono text-amber-300 font-black text-xs">
+                    {params.signalId}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center pb-2 border-b border-gray-800/60">
+                  <span className="text-gray-400">Symbol & Side:</span>
+                  <span className={`font-black text-sm px-2 py-0.5 rounded ${
+                    params.side === 'BUY'
+                      ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                      : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
+                  }`}>
+                    {params.symbol} • {params.side}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-gray-400">Calculated Volume (Lot):</span>
+                  <span className="text-blue-400 font-extrabold text-sm">{params.lot.toFixed(2)} Lots</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-gray-400">Entry Price:</span>
+                  <span className="text-white font-bold font-mono">${params.entryPrice.toFixed(currentSymbolSpec.digits || 2)}</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-gray-400">Stop Loss:</span>
+                  <span className="text-rose-400 font-bold font-mono">${params.stopLoss.toFixed(currentSymbolSpec.digits || 2)}</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-gray-400">Take Profit 1:</span>
+                  <span className="text-emerald-400 font-bold font-mono">${params.takeProfit1.toFixed(currentSymbolSpec.digits || 2)}</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-gray-400">Take Profit 2:</span>
+                  <span className="text-emerald-400 font-bold font-mono">
+                    {params.takeProfit2 !== null && params.takeProfit2 !== undefined ? `$${params.takeProfit2.toFixed(currentSymbolSpec.digits || 2)}` : '—'}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-gray-400">Risk Percent:</span>
+                  <span className="text-amber-300 font-bold">{params.riskPercent}%</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-gray-400">Max Estimated Loss at SL:</span>
+                  <span className="text-rose-400 font-bold font-mono">${params.estimatedLoss.toFixed(2)}</span>
+                </div>
+              </div>
+
+              {/* Error Notification Alert in Modal */}
+              {modalExecutionError && (
+                <div className="p-3.5 rounded-xl border border-rose-500/40 bg-rose-500/10 text-rose-300 text-xs space-y-1">
+                  <div className="font-extrabold flex items-center gap-1.5 text-rose-400">
+                    <AlertTriangle className="w-4 h-4 text-rose-400" />
+                    ORDER DISPATCH REJECTED
+                  </div>
+                  <p className="text-[11px] leading-relaxed">{modalExecutionError}</p>
+                </div>
+              )}
+
+              {/* Execution Result Notification */}
+              {executionResult && (
+                <div
+                  className={`p-3.5 rounded-xl border text-xs space-y-1 ${
+                    executionResult.success
+                      ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                      : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
                   }`}
                 >
-                  <Zap className={`w-4 h-4 text-black ${isExecuting ? 'animate-spin' : ''}`} />
-                  <span>{isExecuting ? 'DISPATCHING TO MT5...' : `DISPATCH ${(executingAction || directionBias)} ORDER`}</span>
-                </button>
+                  <div className="font-extrabold flex items-center gap-1.5">
+                    {executionResult.success ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <AlertTriangle className="w-4 h-4 text-rose-400" />}
+                    {executionResult.status}
+                  </div>
+                  <p className="text-[11px] leading-relaxed">{executionResult.message}</p>
+                  {executionResult.mt5_ticket && (
+                    <span className="font-mono text-[10px] text-amber-300 block">
+                      Broker Ticket #{executionResult.mt5_ticket}
+                    </span>
+                  )}
+                </div>
               )}
+
+              {/* Action Buttons */}
+              <div className="flex items-center gap-3 pt-2">
+                <button
+                  onClick={() => {
+                    setShowConfirmModal(false);
+                    setExecutionResult(null);
+                    setModalExecutionError(null);
+                  }}
+                  className="flex-1 py-3 rounded-xl bg-[#0B0E14] hover:bg-gray-800 text-gray-300 font-bold text-xs border border-gray-800 transition-all cursor-pointer"
+                >
+                  CANCEL
+                </button>
+
+                {!executionResult?.success && (
+                  <button
+                    onClick={handleExecuteOrder}
+                    disabled={isExecuting}
+                    className={`flex-1 py-3 rounded-xl text-black font-extrabold text-xs transition-all flex items-center justify-center gap-2 cursor-pointer shadow-lg disabled:opacity-50 ${
+                      params.side === 'BUY'
+                        ? 'bg-emerald-500 hover:bg-emerald-600 shadow-emerald-500/20'
+                        : 'bg-rose-500 hover:bg-rose-600 shadow-rose-500/20'
+                    }`}
+                  >
+                    <Zap className={`w-4 h-4 text-black ${isExecuting ? 'animate-spin' : ''}`} />
+                    <span>{isExecuting ? 'DISPATCHING TO MT5...' : `DISPATCH ${params.side} ORDER`}</span>
+                  </button>
+                )}
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* MT5 EXECUTION QUEUE (PHASE 1 BRIDGE DEBUG PANEL) */}
       <div className="bg-[#121620] border border-gray-800 rounded-xl p-5 shadow-xl space-y-4">
@@ -2429,6 +2593,7 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
                   <th className="py-2.5 px-3">Entry</th>
                   <th className="py-2.5 px-3">SL</th>
                   <th className="py-2.5 px-3">TP1</th>
+                  <th className="py-2.5 px-3">TP2</th>
                   <th className="py-2.5 px-3">Status & Execution Details</th>
                   {isDev && <th className="py-2.5 px-3 text-right">Dev Actions</th>}
                 </tr>
@@ -2468,6 +2633,7 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
                       <td className="py-3 px-3 font-mono text-white whitespace-nowrap">${item.entryPrice.toFixed(2)}</td>
                       <td className="py-3 px-3 font-mono text-rose-400 whitespace-nowrap">${item.stopLoss.toFixed(2)}</td>
                       <td className="py-3 px-3 font-mono text-emerald-400 whitespace-nowrap">${item.takeProfit1.toFixed(2)}</td>
+                      <td className="py-3 px-3 font-mono text-emerald-400 whitespace-nowrap">{item.takeProfit2 !== null && item.takeProfit2 !== undefined ? `$${item.takeProfit2.toFixed(2)}` : '—'}</td>
                       <td className="py-3 px-3 whitespace-nowrap">
                         {item.status === 'PENDING' && (
                           <div className="flex flex-col gap-0.5">
@@ -2527,7 +2693,7 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
                               FAILED
                             </span>
                             <span className="text-[9px] text-red-300 font-mono">
-                              [{item.errorCode || 'TIMEOUT'}] {item.errorMessage || 'Execution timeout'}
+                              {item.errorMessage || 'Execution failure'}
                             </span>
                           </div>
                         )}

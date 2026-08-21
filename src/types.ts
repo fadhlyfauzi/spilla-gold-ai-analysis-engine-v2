@@ -801,6 +801,30 @@ export interface CopilotAuditEvent {
 
 export type TradeOrderStatus = 'PENDING' | 'CLAIMED' | 'PROCESSING' | 'EXECUTED' | 'REJECTED' | 'FAILED';
 
+export interface CanonicalExecutionParameters {
+  signalId: string;
+  snapshotId: string;
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  lot: number;
+  entryPrice: number;
+  stopLoss: number;
+  takeProfit1: number;
+  takeProfit2: number | null;
+  riskPercent: number;
+  estimatedLoss: number;
+  confidence: number;
+  tradingStyle: 'SCALPING' | 'INTRADAY';
+  timeframe: string;
+  potentialEntryZone: string;
+  entryMode: string;
+  stopLossReason?: string;
+  takeProfit1Reason?: string;
+  takeProfit2Reason?: string;
+  riskRewardRatio?: number;
+  createdAt: string;
+}
+
 export interface TradeExecutionOrder {
   signalId: string;
   snapshotId: string;
