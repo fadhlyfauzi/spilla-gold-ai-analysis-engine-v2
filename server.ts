@@ -12,6 +12,7 @@ import { eaRouter } from './server/routes/eaRoutes.js';
 import { authRouter } from './server/routes/authRoutes.js';
 import { adminRouter } from './server/routes/adminRoutes.js';
 import { copytradeRouter } from './server/routes/copytradeRoutes.js';
+import { mt5WorkerRouter } from './server/routes/mt5WorkerRoutes.js';
 import {
   technicalRouter,
   sentimentRouter,
@@ -29,22 +30,25 @@ import { copilotRouter } from './server/routes/copilotRoutes.js';
 import { tradeRouter } from './server/routes/tradeRoutes.js';
 import { creditRouter, adminCreditRouter } from './server/routes/creditRoutes.js';
 
-async function startServer() {
-  const app = express();
-  const PORT = Number(process.env.PORT) || 3000;
+async function startServer() { 
+  const app = express(); 
+  const PORT = Number(process.env.PORT) || 3000; 
+ 
+  app.use(express.json({ limit: '10mb' })); 
+  app.use(express.urlencoded({ extended: true, limit: '10mb' })); 
+ 
+  // Health check endpoint (Railway requirement) 
+  app.use('/api/health', healthRouter); 
+ 
+  // MT5 Execution Bridge Queue
+  app.use('/api/trade', tradeRouter); 
 
-  app.use(express.json({ limit: '10mb' }));
-  app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
-  // Health check endpoint (Railway requirement)
-  app.use('/api/health', healthRouter);
-
-  // MT5 Execution Bridge Queue (Phase 1)
-  app.use('/api/trade', tradeRouter);
-
-  // SPILLA AI Credit System Endpoints
-  app.use('/api/credit', creditRouter);
-  app.use('/api/admin/credit', adminCreditRouter);
+  // MT5 Multi-User Worker & Heartbeat API
+  app.use('/api/mt5', mt5WorkerRouter);
+ 
+  // SPILLA AI Credit System Endpoints 
+  app.use('/api/credit', creditRouter); 
+  app.use('/api/admin/credit', adminCreditRouter); 
 
   // Authentication & Admin Management Endpoints
   app.use('/api/auth', authRouter);

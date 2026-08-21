@@ -15,6 +15,213 @@ export interface UserRecord {
   updatedAt: Date;
 }
 
+export interface TradingAccountRecord {
+  id: string;
+  userId?: string | null;
+  accountNumber: string;
+  brokerServer: string;
+  accountType: string;
+  currency: string;
+  workerId?: string | null;
+  symbol?: string | null;
+  executionEnabled: boolean;
+  workerOnline: boolean;
+  lastHeartbeat?: Date | null;
+  balance: number;
+  equity: number;
+  freeMargin: number;
+  leverage: number;
+  isLive: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// Memory fallback store for TradingAccount if Postgres is unavailable
+class MemoryTradingAccountStore {
+  private accounts: TradingAccountRecord[] = [];
+
+  constructor() {
+    this.seedDefaults();
+  }
+
+  private seedDefaults() {
+    const now = new Date();
+    this.accounts = [
+      {
+        id: 'acc-1019008',
+        userId: 'usr-trader-002',
+        accountNumber: '1019008',
+        brokerServer: 'AIMS-Live',
+        accountType: 'STANDARD',
+        currency: 'USD',
+        workerId: null,
+        symbol: 'XAUUSD.edge',
+        executionEnabled: false,
+        workerOnline: false,
+        lastHeartbeat: null,
+        balance: 10000.0,
+        equity: 10000.0,
+        freeMargin: 10000.0,
+        leverage: 100,
+        isLive: false,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: 'acc-mt5-demo',
+        userId: 'usr-trader-002',
+        accountNumber: 'MT5-DEMO-01',
+        brokerServer: 'AIMS-Live',
+        accountType: 'STANDARD',
+        currency: 'USD',
+        workerId: null,
+        symbol: 'XAUUSD',
+        executionEnabled: false,
+        workerOnline: false,
+        lastHeartbeat: null,
+        balance: 10000.0,
+        equity: 10000.0,
+        freeMargin: 10000.0,
+        leverage: 100,
+        isLive: false,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: 'acc-88201923',
+        userId: 'usr-trader-002',
+        accountNumber: '88201923',
+        brokerServer: 'AIMS-Live',
+        accountType: 'PRO',
+        currency: 'USD',
+        workerId: null,
+        symbol: 'XAUUSD',
+        executionEnabled: false,
+        workerOnline: false,
+        lastHeartbeat: null,
+        balance: 15420.0,
+        equity: 15420.0,
+        freeMargin: 15420.0,
+        leverage: 100,
+        isLive: true,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: 'acc-88204811',
+        userId: 'usr-admin-001',
+        accountNumber: '88204811',
+        brokerServer: 'AIMS-Live',
+        accountType: 'INSTITUTIONAL',
+        currency: 'USD',
+        workerId: null,
+        symbol: 'XAUUSD',
+        executionEnabled: false,
+        workerOnline: false,
+        lastHeartbeat: null,
+        balance: 24850.0,
+        equity: 24850.0,
+        freeMargin: 24850.0,
+        leverage: 100,
+        isLive: true,
+        createdAt: now,
+        updatedAt: now,
+      },
+    ];
+  }
+
+  async count(args?: { where?: any }): Promise<number> {
+    if (!args?.where) return this.accounts.length;
+    const { accountNumber, workerId } = args.where;
+    return this.accounts.filter((a) => {
+      if (accountNumber && a.accountNumber !== accountNumber) return false;
+      if (workerId && a.workerId !== workerId) return false;
+      return true;
+    }).length;
+  }
+
+  async findUnique(args: { where: { accountNumber?: string; id?: string } }): Promise<TradingAccountRecord | null> {
+    const { accountNumber, id } = args.where;
+    if (accountNumber) {
+      const normalized = accountNumber.trim();
+      return this.accounts.find((a) => a.accountNumber === normalized) || null;
+    }
+    if (id) {
+      return this.accounts.find((a) => a.id === id) || null;
+    }
+    return null;
+  }
+
+  async findFirst(args?: { where?: any }): Promise<TradingAccountRecord | null> {
+    if (!args?.where) return this.accounts[0] || null;
+    const { accountNumber, id, workerId } = args.where;
+    return this.accounts.find((a) => {
+      if (accountNumber && a.accountNumber !== accountNumber.trim()) return false;
+      if (id && a.id !== id) return false;
+      if (workerId && a.workerId !== workerId) return false;
+      return true;
+    }) || null;
+  }
+
+  async findMany(args?: { where?: any; orderBy?: any }): Promise<TradingAccountRecord[]> {
+    let list = [...this.accounts];
+    if (args?.where) {
+      const { workerOnline, isLive } = args.where;
+      list = list.filter((a) => {
+        if (workerOnline !== undefined && a.workerOnline !== workerOnline) return false;
+        if (isLive !== undefined && a.isLive !== isLive) return false;
+        return true;
+      });
+    }
+    return list;
+  }
+
+  async create(args: { data: any }): Promise<TradingAccountRecord> {
+    const now = new Date();
+    const newAcc: TradingAccountRecord = {
+      id: `acc-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      userId: args.data.userId || null,
+      accountNumber: String(args.data.accountNumber).trim(),
+      brokerServer: args.data.brokerServer || 'AIMS-Live',
+      accountType: args.data.accountType || 'STANDARD',
+      currency: args.data.currency || 'USD',
+      workerId: args.data.workerId || null,
+      symbol: args.data.symbol || 'XAUUSD',
+      executionEnabled: args.data.executionEnabled ?? false,
+      workerOnline: args.data.workerOnline ?? false,
+      lastHeartbeat: args.data.lastHeartbeat || null,
+      balance: args.data.balance !== undefined ? Number(args.data.balance) : 10000.0,
+      equity: args.data.equity !== undefined ? Number(args.data.equity) : 10000.0,
+      freeMargin: args.data.freeMargin !== undefined ? Number(args.data.freeMargin) : 10000.0,
+      leverage: args.data.leverage !== undefined ? Number(args.data.leverage) : 100,
+      isLive: args.data.isLive !== undefined ? Boolean(args.data.isLive) : false,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.accounts.push(newAcc);
+    return newAcc;
+  }
+
+  async update(args: { where: { accountNumber?: string; id?: string }; data: any }): Promise<TradingAccountRecord> {
+    const idx = this.accounts.findIndex((a) => {
+      if (args.where.accountNumber && a.accountNumber === args.where.accountNumber.trim()) return true;
+      if (args.where.id && a.id === args.where.id) return true;
+      return false;
+    });
+    if (idx === -1) {
+      throw new Error(`TradingAccount not found for update`);
+    }
+    const existing = this.accounts[idx];
+    const updated: TradingAccountRecord = {
+      ...existing,
+      ...args.data,
+      updatedAt: new Date(),
+    };
+    this.accounts[idx] = updated;
+    return updated;
+  }
+}
+
 // Memory fallback store if Postgres is unavailable
 class MemoryUserStore {
   private users: UserRecord[] = [];
@@ -123,6 +330,7 @@ class MemoryUserStore {
 }
 
 const memoryStore = new MemoryUserStore();
+const memoryAccountStore = new MemoryTradingAccountStore();
 
 let realPrisma: PrismaClient | null = null;
 let useRealPrisma = false;
@@ -135,7 +343,7 @@ if (connectionString && (connectionString.startsWith('postgres://') || connectio
     realPrisma = new PrismaClient({ adapter });
     useRealPrisma = true;
   } catch (e) {
-    console.warn('[Prisma Init Warning] Failed to initialize Postgres adapter, falling back to Memory User Store.');
+    console.warn('[Prisma Init Warning] Failed to initialize Postgres adapter, falling back to Memory Stores.');
   }
 }
 
@@ -178,7 +386,52 @@ export const prisma: any = {
       return memoryStore.delete(args);
     },
   },
+  tradingAccount: {
+    count: async (args?: any) => {
+      if (useRealPrisma && realPrisma) {
+        try { return await (realPrisma as any).tradingAccount.count(args); } catch (err) { useRealPrisma = false; }
+      }
+      return memoryAccountStore.count(args);
+    },
+    findUnique: async (args: any) => {
+      if (useRealPrisma && realPrisma) {
+        try { return await (realPrisma as any).tradingAccount.findUnique(args); } catch (err) { useRealPrisma = false; }
+      }
+      return memoryAccountStore.findUnique(args);
+    },
+    findFirst: async (args?: any) => {
+      if (useRealPrisma && realPrisma) {
+        try { return await (realPrisma as any).tradingAccount.findFirst(args); } catch (err) { useRealPrisma = false; }
+      }
+      return memoryAccountStore.findFirst(args);
+    },
+    findMany: async (args?: any) => {
+      if (useRealPrisma && realPrisma) {
+        try { return await (realPrisma as any).tradingAccount.findMany(args); } catch (err) { useRealPrisma = false; }
+      }
+      return memoryAccountStore.findMany(args);
+    },
+    create: async (args: any) => {
+      if (useRealPrisma && realPrisma) {
+        try { return await (realPrisma as any).tradingAccount.create(args); } catch (err) { useRealPrisma = false; }
+      }
+      return memoryAccountStore.create(args);
+    },
+    update: async (args: any) => {
+      if (useRealPrisma && realPrisma) {
+        try { return await (realPrisma as any).tradingAccount.update(args); } catch (err) { useRealPrisma = false; }
+      }
+      return memoryAccountStore.update(args);
+    },
+  },
 };
+
+/**
+ * Returns the singleton Prisma client instance (or architecture fallback)
+ */
+export function getPrismaClient() {
+  return prisma;
+}
 
 export async function seedDefaultUsers() {
   try {
