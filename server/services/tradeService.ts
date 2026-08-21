@@ -291,43 +291,24 @@ export class TradeService {
       }
     }
 
-    // 13. Risk/Reward HARD GATE (CRITICAL)
+    // 12. Risk/Reward Ratio (Calculated for advisory/informational display)
     const risk = side === 'BUY' ? numEntry - numSL : numSL - numEntry;
     const reward = side === 'BUY' ? numTP1 - numEntry : numEntry - numTP1;
-
-    if (risk <= 0 || reward <= 0) {
-      return {
-        valid: false,
-        statusCode: 400,
-        code: 'INVALID_RISK_REWARD',
-        message: 'ORDER DISPATCH REJECTED: Calculated risk and reward must both be strictly positive.',
-      };
-    }
-
-    const calculatedRR = Number((reward / risk).toFixed(2));
+    const calculatedRR = risk > 0 && reward > 0 ? Number((reward / risk).toFixed(2)) : 0;
     const tradingStyle = (payload.tradingStyle || 'INTRADAY').toUpperCase();
-    const minRequiredRR = tradingStyle === 'SCALPING' ? 1.20 : 1.50;
-
-    // Hard block if R/R is below required minimum threshold
-    if (calculatedRR < minRequiredRR) {
-      return {
-        valid: false,
-        statusCode: 400,
-        code: 'RISK_REWARD_BELOW_MINIMUM',
-        message: `ORDER DISPATCH REJECTED: Risk/Reward ratio (1:${calculatedRR.toFixed(2)}) is below the required minimum efficiency of 1:${minRequiredRR.toFixed(2)} for ${tradingStyle}.`,
-        details: {
-          actual: calculatedRR,
-          required: minRequiredRR,
-          tradingStyle,
-        },
-      };
-    }
+    const minRecommendedRR = tradingStyle === 'SCALPING' ? 1.20 : 1.50;
 
     return {
       valid: true,
       statusCode: 200,
       code: 'GATE_PASSED',
       message: 'All execution safety and risk gate checks passed successfully.',
+      details: {
+        riskReward: calculatedRR,
+        minRecommendedRR,
+        tradingStyle,
+        isRecommendedRR: calculatedRR >= minRecommendedRR,
+      },
     };
   }
 

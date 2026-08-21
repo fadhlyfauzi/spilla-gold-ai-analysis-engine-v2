@@ -2410,8 +2410,7 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
         const riskDist = Math.abs(params.entryPrice - params.stopLoss);
         const rewardDist = Math.abs(params.takeProfit1 - params.entryPrice);
         const calculatedRR = riskDist > 0 && rewardDist > 0 ? Number((rewardDist / riskDist).toFixed(2)) : 0;
-        const minRequiredRR = params.tradingStyle === 'SCALPING' ? 1.20 : 1.50;
-        const isRiskRewardPass = calculatedRR >= minRequiredRR;
+        const minRecommendedRR = params.tradingStyle === 'SCALPING' ? 1.20 : 1.50;
 
         const isSignalNotDispatched = !dispatchedSignalIds.includes(params.signalId);
 
@@ -2424,7 +2423,6 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
         if (!isEntryValid) failedGateReasons.push(`Entry price ($${params.entryPrice}) is invalid.`);
         if (!isSLValid) failedGateReasons.push(`Stop Loss ($${params.stopLoss}) must be ${params.side === 'BUY' ? 'below' : 'above'} Entry ($${params.entryPrice}).`);
         if (!isTPValid) failedGateReasons.push(`Take Profit ($${params.takeProfit1}) must be ${params.side === 'BUY' ? 'above' : 'below'} Entry ($${params.entryPrice}).`);
-        if (!isRiskRewardPass) failedGateReasons.push(`Risk/Reward (1:${calculatedRR.toFixed(2)}) is below minimum required 1:${minRequiredRR.toFixed(2)} for ${params.tradingStyle || 'INTRADAY'}.`);
         if (!isSignalNotDispatched) failedGateReasons.push('Signal has already been dispatched to MT5.');
 
         const allGatesPass = failedGateReasons.length === 0;
@@ -2529,8 +2527,8 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
                   </div>
                   <div>
                     <span className="text-gray-500 block text-[10px]">Risk/Reward Ratio:</span>
-                    <span className={`font-bold font-mono ${isRiskRewardPass ? 'text-emerald-400' : 'text-rose-400'}`}>
-                      1 : {calculatedRR.toFixed(2)} {isRiskRewardPass ? '✓' : `(Min 1:${minRequiredRR.toFixed(2)})`}
+                    <span className="text-blue-400 font-bold font-mono">
+                      1 : {calculatedRR.toFixed(2)} <span className="text-[9px] text-gray-400 font-normal">(Advisory)</span>
                     </span>
                   </div>
                   <div>
@@ -2567,15 +2565,15 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
                     </span>
                   </div>
                   <div className="flex items-center justify-between">
-                    <span className="text-gray-400">4. Risk / Reward Minimum (≥ 1:{minRequiredRR.toFixed(2)}):</span>
-                    <span className={isRiskRewardPass ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
-                      {isRiskRewardPass ? `PASS ✓ (1:${calculatedRR.toFixed(2)})` : `FAIL (1:${calculatedRR.toFixed(2)} < 1:${minRequiredRR.toFixed(2)})`}
+                    <span className="text-gray-400">4. Direction & Structure (SL/TP):</span>
+                    <span className={isSLValid && isTPValid ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+                      {isSLValid && isTPValid ? 'PASS ✓' : 'FAIL (Invalid Levels)'}
                     </span>
                   </div>
                   <div className="flex items-center justify-between">
-                    <span className="text-gray-400">5. Direction & Structure (SL/TP):</span>
-                    <span className={isSLValid && isTPValid ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
-                      {isSLValid && isTPValid ? 'PASS ✓' : 'FAIL (Invalid Levels)'}
+                    <span className="text-gray-400">5. Risk / Reward:</span>
+                    <span className="text-blue-400 font-bold">
+                      1:{calculatedRR.toFixed(2)} (ADVISORY ONLY)
                     </span>
                   </div>
                   <div className="flex items-center justify-between">
