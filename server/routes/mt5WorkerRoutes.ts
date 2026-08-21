@@ -10,7 +10,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'spilla_gold_institutional_jwt_secr
 /**
  * Authentication Middleware for MT5 User Operations
  */
-async function requireAuth(req: any, res: any, next: any) {
+export async function requireAuth(req: any, res: any, next: any) {
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -459,5 +459,64 @@ mt5WorkerRouter.get('/workers', async (_req, res) => {
     });
   } catch (error: any) {
     return res.status(500).json({ success: false, message: error?.message || 'Failed to list workers' });
+  }
+});
+
+/**
+ * PATCH /api/mt5/accounts/:accountNumber/execution
+ * Allows authenticated owner to toggle executionEnabled (true/false)
+ */
+mt5WorkerRouter.patch('/accounts/:accountNumber/execution', requireAuth, async (req: any, res: any) => {
+  try {
+    const accountNumber = String(req.params.accountNumber || '').trim();
+    const { executionEnabled } = req.body;
+
+    if (!accountNumber) {
+      return res.status(400).json({ success: false, message: 'Account number is required' });
+    }
+
+    const account = await prisma.tradingAccount.findUnique({
+      where: { accountNumber },
+    });
+
+    if (!account) {
+      return res.status(404).json({
+        success: false,
+        code: 'TRADING_ACCOUNT_NOT_FOUND',
+        message: 'Trading account not found',
+      });
+    }
+
+    // Ownership check
+    if (account.userId && account.userId !== req.currentUser?.id && req.currentUser?.role !== 'ADMIN') {
+      return res.status(403).json({
+        success: false,
+        code: 'FORBIDDEN',
+        message: 'You are not authorized to modify this account',
+      });
+    }
+
+    const updated = await prisma.tradingAccount.update({
+      where: { accountNumber },
+      data: {
+        executionEnabled: Boolean(executionEnabled),
+      },
+    });
+
+    console.log(
+      `[MT5 ACCOUNT EXECUTION TOGGLED] Account=${accountNumber} User=${req.currentUser?.id} ExecutionEnabled=${updated.executionEnabled}`
+    );
+
+    return res.json({
+      success: true,
+      code: 'EXECUTION_UPDATED',
+      message: `MT5 execution ${updated.executionEnabled ? 'ENABLED' : 'DISABLED'} for account ${accountNumber}`,
+      account: {
+        ...updated,
+        workerOnline: isWorkerOnline(updated.lastHeartbeat),
+      },
+    });
+  } catch (error: any) {
+    return res.status(500).json({ success: false, message: error?.message || 'Failed to update execution switch' });
   }
 });

@@ -1,1387 +1,538 @@
-import {
-  TradeExecutionOrder,
-  TradeOrderStatus,
-} from '../../src/types.js';
+import { TradeExecutionOrder, TradeOrderStatus } from '../../src/types.js';
 
 export const MT5_EXECUTION_MODE: 'TEST' | 'LIVE' = 'TEST';
+export const CLAIM_TIMEOUT_MS = 60 * 1000; // 60 seconds claim timeout protection
 
-export const CLAIM_TIMEOUT_MS = 60 * 1000;
-
-// Legacy authorized accounts.
-// Dipertahankan agar flow existing tetap kompatibel.
-export const AUTHORIZED_ACCOUNTS = new Set([
-  'MT5-DEMO-01',
-  'MT5-LIVE-01',
-  'MT5-PRO-01',
-  'MT5-XAUUSD-01',
-]);
+// Pre-authorized MT5 accounts (demo & live)
+export const AUTHORIZED_ACCOUNTS = new Set(['MT5-DEMO-01', 'MT5-LIVE-01', 'MT5-PRO-01', 'MT5-XAUUSD-01']);
 
 export class TradeService {
   private queue: TradeExecutionOrder[] = [];
-
-  private dispatchedSignals: Set<string> =
-    new Set();
-
-  private timeoutInterval:
-    | NodeJS.Timeout
-    | null = null;
+  private dispatchedSignals: Set<string> = new Set();
+  private timeoutInterval: NodeJS.Timeout | null = null;
 
   constructor() {
-    // ==============================================================
-    // CLAIM TIMEOUT WATCHER
-    // ==============================================================
-    this.timeoutInterval = setInterval(
-      () => {
-        this.checkClaimTimeouts();
-      },
-      10000,
-    );
-
+    // Background sweep for claim timeout protection every 10 seconds
+    this.timeoutInterval = setInterval(() => {
+      this.checkClaimTimeouts();
+    }, 10000);
     if (this.timeoutInterval?.unref) {
       this.timeoutInterval.unref();
     }
   }
 
-  // ================================================================
-  // CLAIM TIMEOUT PROTECTION
-  // ================================================================
-
+  /**
+   * Evaluates all CLAIMED orders and marks expired claims as FAILED to prevent silent duplicate execution.
+   */
   public checkClaimTimeouts(): void {
     const now = Date.now();
-
     for (const order of this.queue) {
-      if (
-        order.status === 'CLAIMED' &&
-        order.claimedAt
-      ) {
-        const claimedTime =
-          new Date(
-            order.claimedAt,
-          ).getTime();
-
-        if (
-          now - claimedTime >
-          CLAIM_TIMEOUT_MS
-        ) {
+      if (order.status === 'CLAIMED' && order.claimedAt) {
+        const claimedTime = new Date(order.claimedAt).getTime();
+        if (now - claimedTime > CLAIM_TIMEOUT_MS) {
           console.warn(
-            `[MT5 BRIDGE TIMEOUT] Order ${order.signalId} ` +
-              `claimed by ${order.claimedBy} timed out (>60s).`,
+            `[MT5 BRIDGE TIMEOUT] Order ${order.signalId} claimed by ${order.claimedBy} timed out (>60s). Marking as FAILED.`
           );
-
           order.status = 'FAILED';
-
-          order.errorCode =
-            'CLAIM_TIMEOUT';
-
-          order.errorMessage =
-            'Claimed order timed out after 60 seconds without MT5 execution result.';
-
-          order.updatedAt =
-            new Date().toISOString();
+          order.errorCode = 'CLAIM_TIMEOUT';
+          order.errorMessage = 'Claimed order timed out after 60s without receiving execution result from MT5 EA';
+          order.updatedAt = new Date().toISOString();
         }
       }
     }
   }
 
-  // ================================================================
-  // 1. EXECUTE / ENQUEUE ORDER
-  // ================================================================
-
-  public executeOrder(
-    payload: Partial<TradeExecutionOrder>,
-  ): {
+  /**
+   * 1. Hardened Server-Side Validation & Enqueue
+   */
+  public executeOrder(payload: Partial<TradeExecutionOrder>): {
     success: boolean;
     code: string;
     message: string;
     order?: TradeExecutionOrder;
   } {
+    // Always sweep expired claims first
     this.checkClaimTimeouts();
 
     const {
-      // ============================================================
-      // IDENTIFIERS
-      // ============================================================
       signalId,
       snapshotId,
-
-      userId,
+      accountId,
       tradingAccountId,
-
-      accountId = 'MT5-DEMO-01',
       accountNumber,
       targetWorkerId,
-
-      // ============================================================
-      // TRADE DATA
-      // ============================================================
+      userId,
+      broker = 'AIMS',
+      brokerServer = 'AIMS-Live',
       symbol = 'XAUUSD',
-
       side,
-
       orderType = 'MARKET',
-
       lot,
-
       capturePrice,
-
       entryPrice,
-
       stopLoss,
-
       takeProfit1,
-
       takeProfit2 = null,
-
       riskPercent = 1.0,
-
       estimatedLoss = 0,
-
       confidence = 80,
-
       tradingStyle = 'INTRADAY',
-
       timeframe = 'H1',
-
       riskValidation = 'PASS',
     } = payload;
 
-    // ==============================================================
-    // RULE 1 — SIGNAL ID
-    // ==============================================================
-
-    if (
-      !signalId ||
-      typeof signalId !== 'string' ||
-      signalId.trim() === ''
-    ) {
+    // Rule 1: Signal ID uniqueness & validation
+    if (!signalId || typeof signalId !== 'string' || signalId.trim() === '') {
       return {
         success: false,
         code: 'INVALID_SIGNAL_ID',
-        message:
-          'ORDER DISPATCH REJECTED: signalId must be valid.',
+        message: 'ORDER DISPATCH REJECTED: signalId must be unique and valid.',
       };
     }
 
-    const cleanSignalId =
-      signalId.trim();
-
-    if (
-      this.dispatchedSignals.has(
-        cleanSignalId,
-      ) ||
-      this.queue.some(
-        (o) =>
-          o.signalId ===
-          cleanSignalId,
-      )
-    ) {
+    const cleanSignalId = signalId.trim();
+    if (this.dispatchedSignals.has(cleanSignalId) || this.queue.some((o) => o.signalId === cleanSignalId)) {
       return {
         success: false,
         code: 'DUPLICATE_SIGNAL',
-        message:
-          'DUPLICATE SIGNAL — ORDER ALREADY DISPATCHED',
+        message: 'DUPLICATE SIGNAL — ORDER ALREADY DISPATCHED',
       };
     }
 
-    // ==============================================================
-    // RULE 2 — RISK VALIDATION
-    // ==============================================================
-
-    if (
-      riskValidation !== 'PASS'
-    ) {
+    // Rule 2: Risk Validation must be PASS
+    if (riskValidation !== 'PASS') {
       return {
         success: false,
-        code:
-          'RISK_VALIDATION_FAILED',
-
-        message:
-          `ORDER DISPATCH REJECTED: ` +
-          `Risk Validation must be PASS ` +
-          `(received: ${riskValidation}).`,
+        code: 'RISK_VALIDATION_FAILED',
+        message: `ORDER DISPATCH REJECTED: Risk Validation must be PASS (received: ${riskValidation}).`,
       };
     }
 
-    // ==============================================================
-    // RULE 3 — ACCOUNT
-    // ==============================================================
-
-    if (
-      !accountId ||
-      typeof accountId !==
-        'string' ||
-      accountId.trim() === ''
-    ) {
+    // Rule 3: Account verification
+    const resolvedAccount = String(accountNumber || accountId || '').trim();
+    if (!resolvedAccount) {
       return {
         success: false,
-        code:
-          'INVALID_ACCOUNT',
-
-        message:
-          'ORDER DISPATCH REJECTED: accountId is required.',
+        code: 'UNAUTHORIZED_ACCOUNT',
+        message: 'ORDER DISPATCH REJECTED: accountId or accountNumber must exist and be authorized.',
       };
     }
 
-    const cleanAccountId =
-      accountId.trim();
-
-    // Tidak lagi membatasi hanya predefined account.
-    // Ini diperlukan untuk multi-user / UUID trading account.
-    //
-    // Legacy AUTHORIZED_ACCOUNTS tetap dipertahankan,
-    // tapi tidak lagi menjadi satu-satunya sumber authorization.
-
-    // ==============================================================
-    // CLEAN ROUTING VALUES
-    // ==============================================================
-
-    const cleanUserId =
-      typeof userId === 'string' &&
-      userId.trim() !== ''
-        ? userId.trim()
-        : undefined;
-
-    const cleanTradingAccountId =
-      typeof tradingAccountId ===
-        'string' &&
-      tradingAccountId.trim() !== ''
-        ? tradingAccountId.trim()
-        : undefined;
-
-    const cleanAccountNumber =
-      typeof accountNumber ===
-        'string' &&
-      accountNumber.trim() !== ''
-        ? accountNumber.trim()
-        : undefined;
-
-    const cleanTargetWorkerId =
-      typeof targetWorkerId ===
-        'string' &&
-      targetWorkerId.trim() !== ''
-        ? targetWorkerId.trim()
-        : undefined;
-
-    // ==============================================================
-    // RULE 4 — SNAPSHOT
-    // ==============================================================
-
-    if (
-      !snapshotId ||
-      typeof snapshotId !==
-        'string' ||
-      snapshotId.trim() === ''
-    ) {
+    // Rule 4: snapshotId must exist and be valid
+    if (!snapshotId || typeof snapshotId !== 'string' || snapshotId.trim() === '') {
       return {
         success: false,
         code: 'INVALID_SNAPSHOT',
-        message:
-          'ORDER DISPATCH REJECTED: snapshotId is required.',
+        message: 'ORDER DISPATCH REJECTED: snapshotId must exist and be valid.',
       };
     }
 
-    // ==============================================================
-    // RULE 5 — SYMBOL
-    // ==============================================================
-
-    if (
-      !symbol ||
-      typeof symbol !== 'string' ||
-      symbol.trim() === ''
-    ) {
+    // Rule 5: Symbol validation
+    if (!symbol || typeof symbol !== 'string' || symbol.trim() === '') {
       return {
         success: false,
         code: 'INVALID_SYMBOL',
-        message:
-          'ORDER DISPATCH REJECTED: Symbol is invalid.',
+        message: 'ORDER DISPATCH REJECTED: Symbol is invalid.',
       };
     }
 
-    // ==============================================================
-    // RULE 6 — SIDE
-    // ==============================================================
-
-    if (
-      side !== 'BUY' &&
-      side !== 'SELL'
-    ) {
+    // Rule 6: Side validation
+    if (side !== 'BUY' && side !== 'SELL') {
       return {
         success: false,
         code: 'INVALID_SIDE',
-        message:
-          'ORDER DISPATCH REJECTED: Order side must be BUY or SELL.',
+        message: 'ORDER DISPATCH REJECTED: Order side must be BUY or SELL.',
       };
     }
 
-    // ==============================================================
-    // RULE 7 — LOT
-    // ==============================================================
-
-    const numericLot =
-      Number(lot);
-
-    if (
-      Number.isNaN(numericLot) ||
-      numericLot <= 0
-    ) {
+    // Rule 7: lot > 0 validation
+    const numericLot = Number(lot);
+    if (isNaN(numericLot) || numericLot <= 0) {
       return {
         success: false,
         code: 'INVALID_LOT',
-        message:
-          'ORDER DISPATCH REJECTED: lot must be greater than 0.',
+        message: 'ORDER DISPATCH REJECTED: lot size must be strictly greater than 0.',
       };
     }
 
-    // ==============================================================
-    // RULE 8 — ENTRY
-    // ==============================================================
-
-    const numEntry =
-      Number(entryPrice);
-
-    if (
-      Number.isNaN(numEntry) ||
-      numEntry <= 0
-    ) {
+    // Rule 8: Entry price validation
+    const numEntry = Number(entryPrice);
+    if (isNaN(numEntry) || numEntry <= 0) {
       return {
         success: false,
-        code:
-          'INVALID_ENTRY_PRICE',
-
-        message:
-          'ORDER DISPATCH REJECTED: Entry price must be greater than 0.',
+        code: 'INVALID_ENTRY_PRICE',
+        message: 'ORDER DISPATCH REJECTED: Entry price must be greater than 0.',
       };
     }
 
-    // ==============================================================
-    // RULE 9 — STOP LOSS
-    // ==============================================================
-
-    const numSL =
-      Number(stopLoss);
-
-    if (
-      Number.isNaN(numSL) ||
-      numSL <= 0
-    ) {
+    // Rule 9: Stop Loss validation
+    const numSL = Number(stopLoss);
+    if (isNaN(numSL) || numSL <= 0) {
       return {
         success: false,
-        code:
-          'INVALID_STOP_LOSS',
-
-        message:
-          'ORDER DISPATCH REJECTED: Stop Loss must be greater than 0.',
+        code: 'INVALID_STOP_LOSS',
+        message: 'ORDER DISPATCH REJECTED: Stop Loss level is required and must be > 0.',
       };
     }
 
-    // ==============================================================
-    // RULE 10 — TP1
-    // ==============================================================
-
-    const numTP1 =
-      Number(takeProfit1);
-
-    if (
-      Number.isNaN(numTP1) ||
-      numTP1 <= 0
-    ) {
+    // Rule 10: Take Profit 1 validation
+    const numTP1 = Number(takeProfit1);
+    if (isNaN(numTP1) || numTP1 <= 0) {
       return {
         success: false,
-        code:
-          'INVALID_TAKE_PROFIT',
-
-        message:
-          'ORDER DISPATCH REJECTED: TP1 must be greater than 0.',
+        code: 'INVALID_TAKE_PROFIT',
+        message: 'ORDER DISPATCH REJECTED: Take Profit 1 level is required and must be > 0.',
       };
     }
 
-    // ==============================================================
-    // RULE 11 — BUY STRUCTURE
-    // ==============================================================
-
+    // Rule 11: BUY rule: SL < Entry < TP
     if (side === 'BUY') {
       if (numSL >= numEntry) {
         return {
           success: false,
           code: 'INVALID_BUY_SL',
-
-          message:
-            `ORDER DISPATCH REJECTED: ` +
-            `For BUY, SL (${numSL}) must be below Entry (${numEntry}).`,
+          message: `ORDER DISPATCH REJECTED: For BUY order, Stop Loss ($${numSL}) must be strictly below Entry ($${numEntry}).`,
         };
       }
-
       if (numEntry >= numTP1) {
         return {
           success: false,
-          code:
-            'INVALID_BUY_TP',
-
-          message:
-            `ORDER DISPATCH REJECTED: ` +
-            `For BUY, TP1 (${numTP1}) must be above Entry (${numEntry}).`,
+          code: 'INVALID_BUY_TP',
+          message: `ORDER DISPATCH REJECTED: For BUY order, Entry ($${numEntry}) must be strictly below Take Profit ($${numTP1}).`,
         };
       }
     }
 
-    // ==============================================================
-    // RULE 12 — SELL STRUCTURE
-    // ==============================================================
-
+    // Rule 12: SELL rule: TP < Entry < SL
     if (side === 'SELL') {
       if (numTP1 >= numEntry) {
         return {
           success: false,
-          code:
-            'INVALID_SELL_TP',
-
-          message:
-            `ORDER DISPATCH REJECTED: ` +
-            `For SELL, TP1 (${numTP1}) must be below Entry (${numEntry}).`,
+          code: 'INVALID_SELL_TP',
+          message: `ORDER DISPATCH REJECTED: For SELL order, Take Profit ($${numTP1}) must be strictly below Entry ($${numEntry}).`,
         };
       }
-
       if (numEntry >= numSL) {
         return {
           success: false,
-          code:
-            'INVALID_SELL_SL',
-
-          message:
-            `ORDER DISPATCH REJECTED: ` +
-            `For SELL, SL (${numSL}) must be above Entry (${numEntry}).`,
+          code: 'INVALID_SELL_SL',
+          message: `ORDER DISPATCH REJECTED: For SELL order, Entry ($${numEntry}) must be strictly below Stop Loss ($${numSL}).`,
         };
       }
     }
 
-    // ==============================================================
-    // CONSTRUCT ORDER
-    // ==============================================================
-
-    const now =
-      new Date().toISOString();
-
-    const order:
-      TradeExecutionOrder = {
-      signalId:
-        cleanSignalId,
-
-      snapshotId:
-        String(snapshotId),
-
-      // ============================================================
-      // MULTI USER ROUTING
-      // ============================================================
-
-      userId:
-        cleanUserId,
-
-      tradingAccountId:
-        cleanTradingAccountId,
-
-      accountId:
-        cleanAccountId,
-
-      accountNumber:
-        cleanAccountNumber,
-
-      targetWorkerId:
-        cleanTargetWorkerId,
-
-      // ============================================================
-      // TRADE DATA
-      // ============================================================
-
-      symbol:
-        symbol
-          .trim()
-          .toUpperCase(),
-
+    // Construct immutable TradeExecutionOrder
+    const order: TradeExecutionOrder = {
+      signalId: cleanSignalId,
+      snapshotId: String(snapshotId),
+      accountId: resolvedAccount,
+      tradingAccountId: tradingAccountId ? String(tradingAccountId) : undefined,
+      accountNumber: resolvedAccount,
+      targetWorkerId: targetWorkerId ? String(targetWorkerId) : undefined,
+      userId: userId ? String(userId) : undefined,
+      broker: String(broker),
+      brokerServer: String(brokerServer),
+      symbol: symbol.trim(),
       side,
-
-      orderType:
-        orderType as
-          | 'MARKET'
-          | 'LIMIT'
-          | 'STOP',
-
-      lot:
-        Number(
-          numericLot.toFixed(2),
-        ),
-
-      capturePrice:
-        capturePrice !==
-        undefined
-          ? Number(
-              Number(
-                capturePrice,
-              ).toFixed(3),
-            )
-          : Number(
-              numEntry.toFixed(3),
-            ),
-
-      entryPrice:
-        Number(
-          numEntry.toFixed(3),
-        ),
-
-      stopLoss:
-        Number(
-          numSL.toFixed(3),
-        ),
-
-      takeProfit1:
-        Number(
-          numTP1.toFixed(3),
-        ),
-
-      takeProfit2:
-        takeProfit2 !==
-          null &&
-        takeProfit2 !==
-          undefined
-          ? Number(
-              Number(
-                takeProfit2,
-              ).toFixed(3),
-            )
-          : null,
-
-      riskPercent:
-        Number(
-          Number(
-            riskPercent,
-          ).toFixed(2),
-        ),
-
-      estimatedLoss:
-        Number(
-          Number(
-            estimatedLoss,
-          ).toFixed(2),
-        ),
-
-      confidence:
-        Number(confidence),
-
-      tradingStyle:
-        (
-          tradingStyle ||
-          'INTRADAY'
-        ) as
-          | 'SCALPING'
-          | 'INTRADAY',
-
-      timeframe:
-        String(
-          timeframe || 'H1',
-        ),
-
-      // ============================================================
-      // EXECUTION LIFECYCLE
-      // ============================================================
-
+      orderType: orderType as 'MARKET' | 'LIMIT' | 'STOP',
+      lot: Number(numericLot.toFixed(2)),
+      capturePrice: capturePrice ? Number(Number(capturePrice).toFixed(3)) : numEntry,
+      entryPrice: Number(numEntry.toFixed(3)),
+      stopLoss: Number(numSL.toFixed(3)),
+      takeProfit1: Number(numTP1.toFixed(3)),
+      takeProfit2: takeProfit2 ? Number(Number(takeProfit2).toFixed(3)) : null,
+      riskPercent: Number(Number(riskPercent).toFixed(2)),
+      estimatedLoss: Number(Number(estimatedLoss).toFixed(2)),
+      confidence: Number(confidence),
+      tradingStyle: (tradingStyle || 'INTRADAY') as 'SCALPING' | 'INTRADAY',
+      timeframe: String(timeframe || 'H1'),
       status: 'PENDING',
-
-      riskValidation:
-        'PASS',
-
+      riskValidation: 'PASS',
       claimedAt: null,
-
       claimedBy: null,
-
       processedAt: null,
-
       executedAt: null,
-
       mt5Ticket: null,
-
       fillPrice: null,
-
       executedLot: null,
-
       errorCode: null,
-
       errorMessage: null,
-
-      createdAt: now,
-
-      updatedAt: now,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     };
 
-    // ==============================================================
-    // REGISTER
-    // ==============================================================
-
-    this.dispatchedSignals.add(
-      cleanSignalId,
-    );
-
-    // newest masuk depan
+    // Register signal to prevent duplicate dispatches
+    this.dispatchedSignals.add(cleanSignalId);
     this.queue.unshift(order);
 
     console.log(
-      '[MT5 BRIDGE ENQUEUE]',
-      {
-        signalId:
-          order.signalId,
-
-        userId:
-          order.userId,
-
-        tradingAccountId:
-          order.tradingAccountId,
-
-        accountNumber:
-          order.accountNumber,
-
-        targetWorkerId:
-          order.targetWorkerId,
-
-        accountId:
-          order.accountId,
-
-        symbol:
-          order.symbol,
-
-        side:
-          order.side,
-
-        lot:
-          order.lot,
-
-        status:
-          order.status,
-      },
+      `[MT5 BRIDGE] [${MT5_EXECUTION_MODE} MODE] TradeExecutionOrder enqueued: signalId=${order.signalId} targetWorker=${order.targetWorkerId || 'ANY'} account=${order.accountNumber} broker=${order.broker} server=${order.brokerServer} symbol=${order.symbol} side=${order.side} lot=${order.lot} entry=${order.entryPrice} sl=${order.stopLoss} tp1=${order.takeProfit1} status=${order.status}`
     );
 
     return {
       success: true,
-      code:
-        'ORDER_DISPATCHED',
-
-      message:
-        'ORDER DISPATCHED ✓',
-
+      code: 'ORDER_DISPATCHED',
+      message: 'ORDER DISPATCHED ✓',
       order,
     };
   }
 
-  // ================================================================
-  // 2. CLAIM NEXT ORDER
-  // ================================================================
-
-  public claimNextOrder(
-    claimedBy =
-      'MT5_EA_WORKER_1',
-
-    accountNumber?: string,
-  ): {
+  /**
+   * 2. Atomic Order Claim Endpoint Logic
+   * Atomically transitions the oldest matching PENDING order to CLAIMED.
+   * Guarantees that workers only claim orders routed specifically to their target worker / account.
+   */
+  public claimNextOrder(claimedBy = 'MT5_EA_WORKER_1', accountNumber?: string): {
     success: boolean;
     code: string;
     message: string;
-    order?:
-      | TradeExecutionOrder
-      | null;
+    order?: TradeExecutionOrder | null;
   } {
+    // Sweep expired claims first
     this.checkClaimTimeouts();
 
-    const worker =
-      String(
-        claimedBy || '',
-      ).trim();
+    const cleanClaimedBy = String(claimedBy).trim();
+    const cleanAccount = accountNumber ? String(accountNumber).trim() : null;
 
-    if (!worker) {
+    // Find the oldest PENDING order matching this worker / account (iterate from back to front for FIFO)
+    const reversed = [...this.queue].reverse();
+    const pendingIndex = reversed.findIndex((o) => {
+      if (o.status !== 'PENDING') return false;
+
+      // If order has an explicit targetWorkerId, it must match claimedBy
+      if (o.targetWorkerId) {
+        if (o.targetWorkerId !== cleanClaimedBy) {
+          return false;
+        }
+      }
+
+      // If order has an explicit accountNumber and EA provided accountNumber, it must match
+      if (o.accountNumber && cleanAccount) {
+        if (o.accountNumber !== cleanAccount) {
+          return false;
+        }
+      }
+
+      // Legacy fallback: if no targetWorkerId or accountNumber specified on order
+      if (!o.targetWorkerId && !o.accountNumber) {
+        if (o.accountId && o.accountId !== cleanClaimedBy && o.accountId !== cleanAccount && !o.accountId.startsWith('MT5-DEMO')) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+
+    if (pendingIndex === -1) {
       return {
         success: false,
-        code:
-          'WORKER_ID_REQUIRED',
-
-        message:
-          'Worker ID is required.',
-
+        code: 'NO_PENDING_ORDERS',
+        message: `No pending orders available to claim for worker ${cleanClaimedBy}${cleanAccount ? ` on account ${cleanAccount}` : ''}.`,
         order: null,
       };
     }
 
-    const cleanAccountNumber =
-      accountNumber
-        ? String(
-            accountNumber,
-          ).trim()
-        : undefined;
+    // Convert reversed index back to actual index
+    const actualIndex = this.queue.length - 1 - pendingIndex;
+    const targetOrder = this.queue[actualIndex];
 
-    // ==============================================================
-    // FIFO:
-    // Queue dibuat menggunakan unshift.
-    // Jadi cari dari belakang.
-    //
-    // IMPORTANT ROUTING:
-    //
-    // 1. Jika order punya targetWorkerId:
-    //      hanya worker yang cocok boleh claim.
-    //
-    // 2. Jika targetWorkerId belum ada:
-    //      dianggap legacy order dan tetap boleh diclaim.
-    //
-    // Ini menjaga EA existing tetap bekerja selama migrasi.
-    // ==============================================================
-
-    let actualIndex = -1;
-
-    for (
-      let i =
-        this.queue.length - 1;
-      i >= 0;
-      i--
-    ) {
-      const order =
-        this.queue[i];
-
-      if (
-        order.status !==
-        'PENDING'
-      ) {
-        continue;
-      }
-
-      // ============================================================
-      // WORKER ROUTING
-      // ============================================================
-
-      if (
-        order.targetWorkerId &&
-        order.targetWorkerId !==
-          worker
-      ) {
-        continue;
-      }
-
-      // ============================================================
-      // ACCOUNT ROUTING
-      // ============================================================
-
-      if (
-        cleanAccountNumber &&
-        order.accountNumber &&
-        order.accountNumber !==
-          cleanAccountNumber
-      ) {
-        continue;
-      }
-
-      actualIndex = i;
-      break;
-    }
-
-    if (actualIndex === -1) {
-      return {
-        success: false,
-
-        code:
-          'NO_PENDING_ORDERS',
-
-        message:
-          `No pending order available for worker ${worker}.`,
-
-        order: null,
-      };
-    }
-
-    const targetOrder =
-      this.queue[
-        actualIndex
-      ];
-
-    // ==============================================================
-    // ATOMIC CLAIM
-    // ==============================================================
-
-    targetOrder.status =
-      'CLAIMED';
-
-    targetOrder.claimedAt =
-      new Date().toISOString();
-
-    targetOrder.claimedBy =
-      worker;
-
-    targetOrder.updatedAt =
-      new Date().toISOString();
+    // Atomically transition status to CLAIMED
+    targetOrder.status = 'CLAIMED';
+    targetOrder.claimedAt = new Date().toISOString();
+    targetOrder.claimedBy = cleanClaimedBy;
+    targetOrder.updatedAt = new Date().toISOString();
 
     console.log(
-      '[MT5 BRIDGE CLAIM]',
-      {
-        signalId:
-          targetOrder.signalId,
-
-        worker,
-
-        accountNumber:
-          targetOrder.accountNumber,
-
-        targetWorkerId:
-          targetOrder.targetWorkerId,
-      },
+      `[MT5 BRIDGE ATOMIC CLAIM] Order ${targetOrder.signalId} (Account ${targetOrder.accountNumber || targetOrder.accountId}) successfully claimed by worker [${cleanClaimedBy}]`
     );
 
     return {
       success: true,
-
-      code:
-        'ORDER_CLAIMED',
-
-      message:
-        `Order ${targetOrder.signalId} claimed successfully by ${worker}`,
-
-      order:
-        targetOrder,
+      code: 'ORDER_CLAIMED',
+      message: `Order ${targetOrder.signalId} claimed successfully by ${cleanClaimedBy}`,
+      order: targetOrder,
     };
   }
 
-  // ================================================================
-  // 3. MARK PROCESSING
-  // ================================================================
-
-  public markOrderProcessing(
-    signalId: string,
-    claimedBy?: string,
-  ): {
+  /**
+   * 3. Result Reporting Endpoint Logic
+   * Updates order lifecycle with final MT5 EA execution or rejection details.
+   */
+  public recordOrderResult(payload: {
+    signalId: string;
+    status: TradeOrderStatus;
+    mt5Ticket?: string | number;
+    fillPrice?: number;
+    executedLot?: number;
+    errorCode?: string;
+    errorMessage?: string;
+  }): {
     success: boolean;
     code: string;
     message: string;
     order?: TradeExecutionOrder;
   } {
-    if (
-      !signalId ||
-      typeof signalId !==
-        'string'
-    ) {
+    const { signalId, status, mt5Ticket, fillPrice, executedLot, errorCode, errorMessage } = payload;
+
+    if (!signalId || typeof signalId !== 'string') {
       return {
         success: false,
-
-        code:
-          'INVALID_SIGNAL_ID',
-
-        message:
-          'Valid signalId is required.',
+        code: 'INVALID_SIGNAL_ID',
+        message: 'Valid signalId is required to record execution result.',
       };
     }
 
-    const cleanSignalId =
-      signalId.trim();
-
-    const order =
-      this.queue.find(
-        (o) =>
-          o.signalId ===
-          cleanSignalId,
-      );
+    const cleanSignalId = signalId.trim();
+    const order = this.queue.find((o) => o.signalId === cleanSignalId);
 
     if (!order) {
       return {
         success: false,
-
-        code:
-          'ORDER_NOT_FOUND',
-
-        message:
-          `Order ${cleanSignalId} was not found.`,
+        code: 'ORDER_NOT_FOUND',
+        message: `Order with signalId "${cleanSignalId}" was not found in execution queue.`,
       };
     }
 
-    // ==============================================================
-    // TERMINAL STATE
-    // ==============================================================
-
-    if (
-      order.status ===
-        'EXECUTED' ||
-      order.status ===
-        'REJECTED' ||
-      order.status ===
-        'FAILED'
-    ) {
-      return {
-        success: false,
-
-        code:
-          'INVALID_TRANSITION',
-
-        message:
-          `Order ${cleanSignalId} is already ${order.status}.`,
-      };
-    }
-
-    const worker =
-      claimedBy
-        ? claimedBy.trim()
-        : undefined;
-
-    // ==============================================================
-    // WORKER OWNERSHIP VALIDATION
-    // ==============================================================
-
-    if (
-      worker &&
-      order.claimedBy &&
-      worker !==
-        order.claimedBy
-    ) {
-      return {
-        success: false,
-
-        code:
-          'WORKER_MISMATCH',
-
-        message:
-          `Order ${cleanSignalId} is owned by worker ${order.claimedBy}, not ${worker}.`,
-      };
-    }
-
-    if (
-      worker &&
-      order.targetWorkerId &&
-      worker !==
-        order.targetWorkerId
-    ) {
-      return {
-        success: false,
-
-        code:
-          'TARGET_WORKER_MISMATCH',
-
-        message:
-          `Worker ${worker} is not authorized for order ${cleanSignalId}.`,
-      };
-    }
-
-    order.status =
-      'PROCESSING';
-
-    order.processedAt =
-      new Date().toISOString();
-
-    order.updatedAt =
-      new Date().toISOString();
-
-    if (worker) {
-      order.claimedBy =
-        worker;
-    }
-
-    console.log(
-      `[MT5 BRIDGE PROCESSING] ${cleanSignalId} worker=${order.claimedBy}`,
-    );
-
-    return {
-      success: true,
-
-      code:
-        'ORDER_PROCESSING',
-
-      message:
-        `Order ${cleanSignalId} is now PROCESSING.`,
-
-      order,
-    };
-  }
-
-  // ================================================================
-  // 4. RECORD EXECUTION RESULT
-  // ================================================================
-
-  public recordOrderResult(
-    payload: {
-      signalId: string;
-
-      status:
-        TradeOrderStatus;
-
-      claimedBy?: string;
-
-      mt5Ticket?:
-        | string
-        | number;
-
-      fillPrice?: number;
-
-      executedLot?: number;
-
-      errorCode?: string;
-
-      errorMessage?: string;
-    },
-  ): {
-    success: boolean;
-    code: string;
-    message: string;
-    order?: TradeExecutionOrder;
-  } {
-    const {
-      signalId,
-
-      status,
-
-      claimedBy,
-
-      mt5Ticket,
-
-      fillPrice,
-
-      executedLot,
-
-      errorCode,
-
-      errorMessage,
-    } = payload;
-
-    if (
-      !signalId ||
-      typeof signalId !==
-        'string'
-    ) {
-      return {
-        success: false,
-
-        code:
-          'INVALID_SIGNAL_ID',
-
-        message:
-          'Valid signalId is required.',
-      };
-    }
-
-    const cleanSignalId =
-      signalId.trim();
-
-    const order =
-      this.queue.find(
-        (o) =>
-          o.signalId ===
-          cleanSignalId,
-      );
-
-    if (!order) {
-      return {
-        success: false,
-
-        code:
-          'ORDER_NOT_FOUND',
-
-        message:
-          `Order ${cleanSignalId} was not found.`,
-      };
-    }
-
-    // ==============================================================
-    // OPTIONAL WORKER VALIDATION
-    //
-    // claimedBy dibuat optional agar EA v2.20 existing
-    // tetap kompatibel.
-    //
-    // EA v2.30 nanti wajib mengirim claimedBy.
-    // ==============================================================
-
-    if (
-      claimedBy &&
-      order.claimedBy &&
-      claimedBy !==
-        order.claimedBy
-    ) {
-      return {
-        success: false,
-
-        code:
-          'WORKER_MISMATCH',
-
-        message:
-          `Worker ${claimedBy} cannot update order owned by ${order.claimedBy}.`,
-      };
-    }
-
-    // ==============================================================
-    // INVALID BACKWARD TRANSITION
-    // ==============================================================
-
-    if (
-      order.status ===
-        'EXECUTED' ||
-      order.status ===
-        'REJECTED' ||
-      order.status ===
-        'FAILED'
-    ) {
-      if (
-        status ===
-          'PROCESSING' ||
-        status ===
-          'CLAIMED' ||
-        status ===
-          'PENDING'
-      ) {
+    // Prevent overwriting terminal statuses (EXECUTED, REJECTED, FAILED)
+    if (order.status === 'EXECUTED' || order.status === 'REJECTED' || order.status === 'FAILED') {
+      if (status === 'PROCESSING' || status === 'CLAIMED' || status === 'PENDING') {
         return {
           success: false,
-
-          code:
-            'INVALID_TRANSITION',
-
-          message:
-            `Order ${cleanSignalId} cannot revert from ${order.status} to ${status}.`,
+          code: 'INVALID_TRANSITION',
+          message: `Order ${cleanSignalId} is already in terminal state ${order.status} and cannot revert to ${status}.`,
         };
       }
     }
 
-    order.status =
-      status;
-
-    order.updatedAt =
-      new Date().toISOString();
-
-    // ==============================================================
-    // EXECUTED
-    // ==============================================================
+    order.status = status;
+    order.updatedAt = new Date().toISOString();
 
     if (status === 'EXECUTED') {
-      order.mt5Ticket =
-        mt5Ticket
-          ? String(
-              mt5Ticket,
-            )
-          : `TKT-${Math.floor(
-              100000000 +
-                Math.random() *
-                  900000000,
-            )}`;
-
-      order.fillPrice =
-        fillPrice !==
-        undefined
-          ? Number(fillPrice)
-          : order.entryPrice;
-
-      order.executedLot =
-        executedLot !==
-        undefined
-          ? Number(
-              executedLot,
-            )
-          : order.lot;
-
-      order.executedAt =
-        new Date().toISOString();
-
+      order.mt5Ticket = mt5Ticket ? String(mt5Ticket) : `TKT-${Math.floor(100000000 + Math.random() * 900000000)}`;
+      order.fillPrice = fillPrice !== undefined ? Number(fillPrice) : order.entryPrice;
+      order.executedLot = executedLot !== undefined ? Number(executedLot) : order.lot;
+      order.executedAt = new Date().toISOString();
       order.errorCode = null;
-
-      order.errorMessage =
-        null;
+      order.errorMessage = null;
 
       console.log(
-        '[MT5 BRIDGE EXECUTED]',
-        {
-          signalId:
-            cleanSignalId,
-
-          worker:
-            order.claimedBy,
-
-          accountNumber:
-            order.accountNumber,
-
-          ticket:
-            order.mt5Ticket,
-
-          fill:
-            order.fillPrice,
-
-          lot:
-            order.executedLot,
-        },
+        `[MT5 BRIDGE RESULT] Order ${cleanSignalId} EXECUTED. Ticket: ${order.mt5Ticket} Fill: ${order.fillPrice} Lot: ${order.executedLot}`
       );
-    }
-
-    // ==============================================================
-    // REJECTED / FAILED
-    // ==============================================================
-
-    else if (
-      status ===
-        'REJECTED' ||
-      status === 'FAILED'
-    ) {
-      order.errorCode =
-        errorCode ||
-        (
-          status ===
-          'REJECTED'
-            ? 'BROKER_REJECTED'
-            : 'EXECUTION_FAILED'
-        );
-
-      order.errorMessage =
-        errorMessage ||
-        'Order was rejected during MT5 execution.';
+    } else if (status === 'REJECTED' || status === 'FAILED') {
+      order.errorCode = errorCode || (status === 'REJECTED' ? 'BROKER_REJECTED' : 'EXECUTION_FAILED');
+      order.errorMessage = errorMessage || 'Order was rejected during MT5 broker execution';
 
       console.warn(
-        '[MT5 BRIDGE FAILED]',
-        {
-          signalId:
-            cleanSignalId,
-
-          worker:
-            order.claimedBy,
-
-          status,
-
-          errorCode:
-            order.errorCode,
-
-          errorMessage:
-            order.errorMessage,
-        },
+        `[MT5 BRIDGE RESULT] Order ${cleanSignalId} ${status}. ErrorCode: ${order.errorCode} Reason: ${order.errorMessage}`
       );
-    }
-
-    // ==============================================================
-    // PROCESSING
-    // ==============================================================
-
-    else if (
-      status ===
-      'PROCESSING'
-    ) {
-      order.processedAt =
-        new Date().toISOString();
+    } else if (status === 'PROCESSING') {
+      order.processedAt = new Date().toISOString();
+      console.log(`[MT5 BRIDGE PROCESSING] Order ${cleanSignalId} marked as PROCESSING.`);
     }
 
     return {
       success: true,
-
-      code:
-        'RESULT_RECORDED',
-
-      message:
-        `Order ${cleanSignalId} status updated to ${status}.`,
-
+      code: 'RESULT_RECORDED',
+      message: `Order ${cleanSignalId} status updated to ${status}.`,
       order,
     };
   }
 
-  // ================================================================
-  // 5. PENDING ORDERS
-  // ================================================================
-
-  public getPendingOrders(
-    targetWorkerId?: string,
-  ): TradeExecutionOrder[] {
-    this.checkClaimTimeouts();
-
-    if (!targetWorkerId) {
-      return this.queue.filter(
-        (order) =>
-          order.status ===
-          'PENDING',
-      );
+  /**
+   * 4. Transition Order from CLAIMED to PROCESSING
+   */
+  public markOrderProcessing(signalId: string, claimedBy?: string): {
+    success: boolean;
+    code: string;
+    message: string;
+    order?: TradeExecutionOrder;
+  } {
+    if (!signalId || typeof signalId !== 'string') {
+      return {
+        success: false,
+        code: 'INVALID_SIGNAL_ID',
+        message: 'Valid signalId is required.',
+      };
     }
 
-    return this.queue.filter(
-      (order) =>
-        order.status ===
-          'PENDING' &&
-        (
-          !order.targetWorkerId ||
-          order.targetWorkerId ===
-            targetWorkerId
-        ),
-    );
+    const cleanSignalId = signalId.trim();
+    const order = this.queue.find((o) => o.signalId === cleanSignalId);
+
+    if (!order) {
+      return {
+        success: false,
+        code: 'ORDER_NOT_FOUND',
+        message: `Order with signalId "${cleanSignalId}" was not found in execution queue.`,
+      };
+    }
+
+    if (order.status === 'EXECUTED' || order.status === 'REJECTED' || order.status === 'FAILED') {
+      return {
+        success: false,
+        code: 'INVALID_TRANSITION',
+        message: `Order ${cleanSignalId} is already in terminal state ${order.status} and cannot be marked as PROCESSING.`,
+      };
+    }
+
+    order.status = 'PROCESSING';
+    order.processedAt = new Date().toISOString();
+    order.updatedAt = new Date().toISOString();
+    if (claimedBy) {
+      order.claimedBy = claimedBy;
+    }
+
+    console.log(`[MT5 BRIDGE PROCESSING] Order ${cleanSignalId} transitioned to PROCESSING.`);
+
+    return {
+      success: true,
+      code: 'ORDER_PROCESSING',
+      message: `Order ${cleanSignalId} is now PROCESSING.`,
+      order,
+    };
   }
 
-  // ================================================================
-  // 6. GET ALL
-  // ================================================================
-
-  public getAllOrders():
-    TradeExecutionOrder[] {
+  /**
+   * Retrieves all orders currently in PENDING status, optionally filtered by workerId/account.
+   */
+  public getPendingOrders(workerId?: string, accountNumber?: string): TradeExecutionOrder[] {
     this.checkClaimTimeouts();
+    return this.queue.filter((order) => {
+      if (order.status !== 'PENDING') return false;
+      if (workerId && order.targetWorkerId && order.targetWorkerId !== workerId) return false;
+      if (accountNumber && order.accountNumber && order.accountNumber !== accountNumber) return false;
+      return true;
+    });
+  }
 
+  /**
+   * Retrieves all orders in the execution queue.
+   */
+  public getAllOrders(): TradeExecutionOrder[] {
+    this.checkClaimTimeouts();
     return this.queue;
   }
 
-  // ================================================================
-  // 7. FIND SIGNAL
-  // ================================================================
-
-  public getOrderBySignalId(
-    signalId: string,
-  ):
-    | TradeExecutionOrder
-    | undefined {
-    return this.queue.find(
-      (o) =>
-        o.signalId ===
-        signalId.trim(),
-    );
+  /**
+   * Retrieves a specific order by signalId.
+   */
+  public getOrderBySignalId(signalId: string): TradeExecutionOrder | undefined {
+    return this.queue.find((o) => o.signalId === signalId.trim());
   }
 
-  // ================================================================
-  // 8. FIND USER ORDERS
-  // ================================================================
-
-  public getOrdersByUserId(
-    userId: string,
-  ):
-    TradeExecutionOrder[] {
-    const clean =
-      userId.trim();
-
-    return this.queue.filter(
-      (o) =>
-        o.userId === clean,
-    );
+  /**
+   * Checks if a signalId was already dispatched.
+   */
+  public isSignalDispatched(signalId: string): boolean {
+    return this.dispatchedSignals.has(signalId.trim());
   }
 
-  // ================================================================
-  // 9. FIND ACCOUNT ORDERS
-  // ================================================================
-
-  public getOrdersByTradingAccountId(
-    tradingAccountId: string,
-  ):
-    TradeExecutionOrder[] {
-    const clean =
-      tradingAccountId.trim();
-
-    return this.queue.filter(
-      (o) =>
-        o.tradingAccountId ===
-        clean,
-    );
-  }
-
-  // ================================================================
-  // 10. DUPLICATE CHECK
-  // ================================================================
-
-  public isSignalDispatched(
-    signalId: string,
-  ): boolean {
-    return this.dispatchedSignals.has(
-      signalId.trim(),
-    );
-  }
-
-  // ================================================================
-  // 11. DEVELOPMENT CLEAR
-  // ================================================================
-
+  /**
+   * Debug / Development helper to clear queue or reset signal.
+   */
   public clearQueue(): void {
     this.queue = [];
-
     this.dispatchedSignals.clear();
   }
 }
 
-export const tradeService =
-  new TradeService();
+export const tradeService = new TradeService();

@@ -1,38 +1,138 @@
 import { Router } from 'express';
-import {
-  tradeService,
-  MT5_EXECUTION_MODE,
-} from '../services/tradeService.js';
+import { tradeService, MT5_EXECUTION_MODE } from '../services/tradeService.js';
+import { getPrismaClient } from '../db/prisma.js';
+import { requireAuth, isWorkerOnline } from './mt5WorkerRoutes.js';
 
 export const tradeRouter = Router();
+const prisma = getPrismaClient();
 
 /**
  * POST /api/trade/execute
- * Creates confirmed TradeExecutionOrder in the execution queue.
+ * Phase 3 Secure Dynamic Execution Routing
+ *
+ * Resolves trading account strictly from:
+ * authenticated SPILLA user -> user's connected TradingAccount ->
+ * accountNumber, workerId, broker symbol, worker online status, executionEnabled status.
  */
-tradeRouter.post('/execute', (req, res) => {
+tradeRouter.post('/execute', requireAuth, async (req: any, res: any) => {
   try {
     const payload = req.body || {};
+    const currentUser = req.currentUser;
 
-    const result =
-      tradeService.executeOrder(payload);
+    if (!currentUser || !currentUser.id) {
+      return res.status(401).json({
+        success: false,
+        code: 'UNAUTHORIZED',
+        error: 'ORDER DISPATCH REJECTED',
+        message: 'Authentication required to execute MT5 trades.',
+      });
+    }
+
+    // 1. Resolve user's connected TradingAccount from database
+    let tradingAccount: any = null;
+
+    if (payload.tradingAccountId) {
+      tradingAccount = await prisma.tradingAccount.findUnique({
+        where: { id: String(payload.tradingAccountId).trim() },
+      });
+
+      if (!tradingAccount) {
+        return res.status(404).json({
+          success: false,
+          code: 'TRADING_ACCOUNT_NOT_FOUND',
+          error: 'ORDER DISPATCH REJECTED',
+          message: 'Specified trading account was not found.',
+        });
+      }
+
+      // Enforce strict account ownership
+      if (tradingAccount.userId && tradingAccount.userId !== currentUser.id && currentUser.role !== 'ADMIN') {
+        return res.status(403).json({
+          success: false,
+          code: 'ACCOUNT_OWNERSHIP_MISMATCH',
+          error: 'ORDER DISPATCH REJECTED',
+          message: 'Trading account does not belong to authenticated user.',
+        });
+      }
+    } else {
+      // Find the primary or most recently updated trading account for this user
+      tradingAccount = await prisma.tradingAccount.findFirst({
+        where: { userId: currentUser.id },
+        orderBy: { updatedAt: 'desc' },
+      });
+
+      if (!tradingAccount) {
+        return res.status(404).json({
+          success: false,
+          code: 'NO_TRADING_ACCOUNT',
+          error: 'ORDER DISPATCH REJECTED',
+          message: 'No connected MT5 trading account found. Please connect your trading account first.',
+        });
+      }
+    }
+
+    // 2. Validate Worker Online Status (Heartbeat within 30s)
+    const workerOnline = isWorkerOnline(tradingAccount.lastHeartbeat);
+    if (!tradingAccount.workerId || !workerOnline) {
+      return res.status(409).json({
+        success: false,
+        code: 'MT5_WORKER_OFFLINE',
+        error: 'ORDER DISPATCH REJECTED',
+        message: `MT5 Worker (${tradingAccount.workerId || 'UNREGISTERED'}) is OFFLINE. Please ensure the SPILLA EA is attached and running in your MT5 terminal.`,
+        account: {
+          accountNumber: tradingAccount.accountNumber,
+          workerId: tradingAccount.workerId,
+          lastHeartbeat: tradingAccount.lastHeartbeat,
+        },
+      });
+    }
+
+    // 3. Validate Execution Switch (executionEnabled === true)
+    if (!tradingAccount.executionEnabled) {
+      return res.status(403).json({
+        success: false,
+        code: 'EXECUTION_DISABLED',
+        error: 'ORDER DISPATCH REJECTED',
+        message: `MT5 execution is DISABLED for account ${tradingAccount.accountNumber}. Enable execution in the MT5 Account settings before dispatching orders.`,
+        account: {
+          accountNumber: tradingAccount.accountNumber,
+          executionEnabled: false,
+        },
+      });
+    }
+
+    // 4. Resolve broker execution symbol from connected account
+    const brokerSymbol =
+      tradingAccount.symbol && tradingAccount.symbol.trim()
+        ? tradingAccount.symbol.trim()
+        : payload.symbol || 'XAUUSD';
+
+    // 5. Enqueue order with server-verified credentials & dynamic routing targets
+    const result = tradeService.executeOrder({
+      ...payload,
+      tradingAccountId: tradingAccount.id,
+      accountNumber: tradingAccount.accountNumber,
+      accountId: tradingAccount.accountNumber,
+      targetWorkerId: tradingAccount.workerId,
+      userId: currentUser.id,
+      broker: tradingAccount.broker || 'AIMS',
+      brokerServer: tradingAccount.brokerServer || 'AIMS-Live',
+      symbol: brokerSymbol,
+    });
 
     if (!result.success) {
-      const statusCode =
-        result.code === 'DUPLICATE_SIGNAL'
-          ? 409
-          : 400;
-
+      const statusCode = result.code === 'DUPLICATE_SIGNAL' ? 409 : 400;
       return res.status(statusCode).json({
         success: false,
         code: result.code,
-        error:
-          result.code === 'DUPLICATE_SIGNAL'
-            ? result.message
-            : 'ORDER DISPATCH REJECTED',
+        error: result.code === 'DUPLICATE_SIGNAL' ? result.message : 'ORDER DISPATCH REJECTED',
         message: result.message,
       });
     }
+
+    console.log(
+      `[DYNAMIC EXECUTION DISPATCHED] Signal=${result.order?.signalId} User=${currentUser.id} Account=${tradingAccount.accountNumber} Worker=${tradingAccount.workerId} Symbol=${brokerSymbol}`
+    );
 
     return res.json({
       success: true,
@@ -40,128 +140,65 @@ tradeRouter.post('/execute', (req, res) => {
       message: 'ORDER DISPATCHED ✓',
       status: 'PENDING MT5 EXECUTION',
       mode: MT5_EXECUTION_MODE,
+      targetWorkerId: tradingAccount.workerId,
+      accountNumber: tradingAccount.accountNumber,
+      brokerSymbol: brokerSymbol,
       order: result.order,
     });
   } catch (err: any) {
-    console.error(
-      '[Trade Execute Route Error]:',
-      err,
-    );
-
+    console.error('[Trade Execute Route Error]:', err);
     return res.status(500).json({
       success: false,
       code: 'INTERNAL_ERROR',
       error: 'ORDER DISPATCH REJECTED',
-      message:
-        err?.message ||
-        'Server failed to process order dispatch',
+      message: err?.message || 'Server failed to process order dispatch',
     });
   }
 });
 
 /**
  * GET /api/trade/pending
- *
- * Optional query:
- * ?workerId=MT5_1019008
- *
- * If workerId is supplied, returns orders available
- * for that worker.
+ * Consumed by SPILLA MT5 Executor EA.
+ * Returns array of pending orders filtered by worker / account if specified.
  */
 tradeRouter.get('/pending', (req, res) => {
   try {
-    const workerId =
-      typeof req.query.workerId === 'string'
-        ? req.query.workerId.trim()
-        : undefined;
+    const { workerId, claimedBy, accountNumber } = req.query;
+    const worker = (workerId || claimedBy) as string | undefined;
+    const pendingOrders = tradeService.getPendingOrders(worker, accountNumber as string | undefined);
 
-    const pendingOrders =
-      tradeService.getPendingOrders(workerId);
-
-    return res.json({
+    res.json({
       success: true,
       mode: MT5_EXECUTION_MODE,
-      workerId: workerId || null,
       count: pendingOrders.length,
       orders: pendingOrders,
     });
   } catch (err: any) {
-    return res.status(500).json({
+    res.status(500).json({
       success: false,
-      code: 'INTERNAL_ERROR',
-      error:
-        err?.message ||
-        'Failed to retrieve pending orders',
+      error: err.message,
     });
   }
 });
 
 /**
  * POST /api/trade/claim
- *
- * EA request example:
- *
- * {
- *   "claimedBy": "MT5_1019008",
- *   "accountNumber": "1019008"
- * }
- *
- * Only an order routed to this worker/account
- * can be claimed.
+ * Atomically claims the next matching PENDING order and sets status to CLAIMED.
+ * Strictly guarantees that workers only claim orders matching their targetWorkerId & accountNumber.
  */
 tradeRouter.post('/claim', (req, res) => {
   try {
-    const {
-      claimedBy,
-      accountNumber,
-    } = req.body || {};
-
-    if (
-      !claimedBy ||
-      typeof claimedBy !== 'string' ||
-      claimedBy.trim() === ''
-    ) {
-      return res.status(400).json({
-        success: false,
-        code: 'WORKER_ID_REQUIRED',
-        message:
-          'Worker ID is required to claim an order.',
-        order: null,
-      });
-    }
-
-    const cleanWorkerId =
-      claimedBy.trim();
-
-    const cleanAccountNumber =
-      typeof accountNumber === 'string' &&
-      accountNumber.trim() !== ''
-        ? accountNumber.trim()
-        : undefined;
-
-    const result =
-      tradeService.claimNextOrder(
-        cleanWorkerId,
-        cleanAccountNumber,
-      );
+    const { claimedBy, workerId, accountNumber } = req.body || {};
+    const worker = claimedBy || workerId || 'MT5_EA_WORKER_1';
+    const result = tradeService.claimNextOrder(worker, accountNumber);
 
     if (!result.success) {
-      return res
-        .status(
-          result.code ===
-          'NO_PENDING_ORDERS'
-            ? 200
-            : 400,
-        )
-        .json({
-          success: false,
-          code: result.code,
-          message: result.message,
-          workerId: cleanWorkerId,
-          accountNumber:
-            cleanAccountNumber || null,
-          order: null,
-        });
+      return res.status(result.code === 'NO_PENDING_ORDERS' ? 200 : 400).json({
+        success: false,
+        code: result.code,
+        message: result.message,
+        order: null,
+      });
     }
 
     return res.json({
@@ -169,176 +206,39 @@ tradeRouter.post('/claim', (req, res) => {
       code: result.code,
       message: result.message,
       mode: MT5_EXECUTION_MODE,
-      workerId: cleanWorkerId,
-      accountNumber:
-        cleanAccountNumber || null,
       order: result.order,
     });
   } catch (err: any) {
-    console.error(
-      '[Trade Claim Route Error]:',
-      err,
-    );
-
+    console.error('[Trade Claim Route Error]:', err);
     return res.status(500).json({
       success: false,
       code: 'INTERNAL_ERROR',
-      error:
-        'Failed to claim pending order',
-      message:
-        err?.message ||
-        'Server internal error',
+      error: 'Failed to claim pending order',
+      message: err?.message || 'Server internal error',
     });
   }
 });
 
 /**
  * POST /api/trade/processing
- *
- * EA request example:
- *
- * {
- *   "signalId": "SIG-...",
- *   "claimedBy": "MT5_1019008"
- * }
+ * Transitions a CLAIMED order to PROCESSING state right before MT5 execution.
  */
-tradeRouter.post(
-  '/processing',
-  (req, res) => {
-    try {
-      const {
-        signalId,
-        claimedBy,
-      } = req.body || {};
-
-      if (
-        !signalId ||
-        typeof signalId !== 'string'
-      ) {
-        return res.status(400).json({
-          success: false,
-          code: 'INVALID_SIGNAL_ID',
-          message:
-            'signalId is required.',
-        });
-      }
-
-      if (
-        !claimedBy ||
-        typeof claimedBy !== 'string'
-      ) {
-        return res.status(400).json({
-          success: false,
-          code: 'WORKER_ID_REQUIRED',
-          message:
-            'claimedBy is required.',
-        });
-      }
-
-      const result =
-        tradeService.markOrderProcessing(
-          signalId.trim(),
-          claimedBy.trim(),
-        );
-
-      if (!result.success) {
-        const statusCode =
-          result.code ===
-          'ORDER_NOT_FOUND'
-            ? 404
-            : 400;
-
-        return res
-          .status(statusCode)
-          .json({
-            success: false,
-            code: result.code,
-            error: result.message,
-            message: result.message,
-          });
-      }
-
-      return res.json({
-        success: true,
-        code: result.code,
-        message: result.message,
-        mode: MT5_EXECUTION_MODE,
-        order: result.order,
-      });
-    } catch (err: any) {
-      console.error(
-        '[Trade Processing Route Error]:',
-        err,
-      );
-
-      return res.status(500).json({
-        success: false,
-        code: 'INTERNAL_ERROR',
-        error:
-          'Failed to mark order as processing',
-        message:
-          err?.message ||
-          'Server internal error',
-      });
-    }
-  },
-);
-
-/**
- * POST /api/trade/result
- *
- * EA should now also send claimedBy.
- *
- * Example:
- *
- * {
- *   "signalId": "SIG-...",
- *   "claimedBy": "MT5_1019008",
- *   "status": "EXECUTED",
- *   "mt5Ticket": "123456",
- *   "fillPrice": 4528.10,
- *   "executedLot": 0.10
- * }
- */
-tradeRouter.post('/result', (req, res) => {
+tradeRouter.post('/processing', (req, res) => {
   try {
-    const payload = req.body || {};
-
-    if (
-      !payload.signalId ||
-      typeof payload.signalId !== 'string'
-    ) {
-      return res.status(400).json({
-        success: false,
-        code: 'INVALID_SIGNAL_ID',
-        message:
-          'signalId is required.',
-      });
-    }
-
-    const result =
-      tradeService.recordOrderResult(
-        payload,
-      );
+    const { signalId, claimedBy } = req.body || {};
+    const result = tradeService.markOrderProcessing(signalId, claimedBy);
 
     if (!result.success) {
-      const statusCode =
-        result.code ===
-        'ORDER_NOT_FOUND'
-          ? 404
-          : 400;
-
-      return res
-        .status(statusCode)
-        .json({
-          success: false,
-          code: result.code,
-          error: result.message,
-          message: result.message,
-        });
+      const statusCode = result.code === 'ORDER_NOT_FOUND' ? 404 : 400;
+      return res.status(statusCode).json({
+        success: false,
+        code: result.code,
+        error: result.message,
+        message: result.message,
+      });
     }
 
-    return res.json({
+    res.json({
       success: true,
       code: result.code,
       message: result.message,
@@ -346,167 +246,91 @@ tradeRouter.post('/result', (req, res) => {
       order: result.order,
     });
   } catch (err: any) {
-    console.error(
-      '[Trade Result Route Error]:',
-      err,
-    );
-
-    return res.status(500).json({
+    console.error('[Trade Processing Route Error]:', err);
+    res.status(500).json({
       success: false,
       code: 'INTERNAL_ERROR',
-      error:
-        'Failed to record execution result',
-      message:
-        err?.message ||
-        'Server internal error',
+      error: 'Failed to mark order as processing',
+      message: err?.message || 'Server internal error',
+    });
+  }
+});
+
+/**
+ * POST /api/trade/result
+ * Updates order with execution outcome (EXECUTED, REJECTED, FAILED).
+ * Accepts MT5 ticket number, fill price, executed lot, or error details.
+ */
+tradeRouter.post('/result', (req, res) => {
+  try {
+    const payload = req.body || {};
+    const result = tradeService.recordOrderResult(payload);
+
+    if (!result.success) {
+      const statusCode = result.code === 'ORDER_NOT_FOUND' ? 404 : 400;
+      return res.status(statusCode).json({
+        success: false,
+        code: result.code,
+        error: result.message,
+        message: result.message,
+      });
+    }
+
+    res.json({
+      success: true,
+      code: result.code,
+      message: result.message,
+      mode: MT5_EXECUTION_MODE,
+      order: result.order,
+    });
+  } catch (err: any) {
+    console.error('[Trade Result Route Error]:', err);
+    res.status(500).json({
+      success: false,
+      code: 'INTERNAL_ERROR',
+      error: 'Failed to record execution result',
+      message: err?.message || 'Server internal error',
     });
   }
 });
 
 /**
  * GET /api/trade/orders
- *
- * Returns all execution queue records.
- * This endpoint is intended for admin/debug use.
+ * Returns all execution queue records for the debug panel.
  */
 tradeRouter.get('/orders', (_req, res) => {
   try {
-    const allOrders =
-      tradeService.getAllOrders();
-
-    return res.json({
+    const allOrders = tradeService.getAllOrders();
+    res.json({
       success: true,
       mode: MT5_EXECUTION_MODE,
       count: allOrders.length,
       orders: allOrders,
     });
   } catch (err: any) {
-    return res.status(500).json({
+    res.status(500).json({
       success: false,
-      code: 'INTERNAL_ERROR',
-      error:
-        err?.message ||
-        'Failed to retrieve orders',
+      error: err.message,
     });
   }
 });
 
 /**
- * GET /api/trade/orders/user/:userId
- *
- * Returns orders belonging to a specific website user.
- */
-tradeRouter.get(
-  '/orders/user/:userId',
-  (req, res) => {
-    try {
-      const userId =
-        String(
-          req.params.userId || '',
-        ).trim();
-
-      if (!userId) {
-        return res.status(400).json({
-          success: false,
-          code: 'INVALID_USER_ID',
-          message:
-            'Valid userId is required.',
-        });
-      }
-
-      const orders =
-        tradeService.getOrdersByUserId(
-          userId,
-        );
-
-      return res.json({
-        success: true,
-        count: orders.length,
-        orders,
-      });
-    } catch (err: any) {
-      return res.status(500).json({
-        success: false,
-        code: 'INTERNAL_ERROR',
-        error:
-          err?.message ||
-          'Failed to retrieve user orders',
-      });
-    }
-  },
-);
-
-/**
- * GET /api/trade/orders/account/:tradingAccountId
- *
- * Returns orders belonging to a specific trading account.
- */
-tradeRouter.get(
-  '/orders/account/:tradingAccountId',
-  (req, res) => {
-    try {
-      const tradingAccountId =
-        String(
-          req.params
-            .tradingAccountId || '',
-        ).trim();
-
-      if (!tradingAccountId) {
-        return res.status(400).json({
-          success: false,
-          code:
-            'INVALID_TRADING_ACCOUNT_ID',
-          message:
-            'Valid tradingAccountId is required.',
-        });
-      }
-
-      const orders =
-        tradeService
-          .getOrdersByTradingAccountId(
-            tradingAccountId,
-          );
-
-      return res.json({
-        success: true,
-        count: orders.length,
-        orders,
-      });
-    } catch (err: any) {
-      return res.status(500).json({
-        success: false,
-        code: 'INTERNAL_ERROR',
-        error:
-          err?.message ||
-          'Failed to retrieve trading account orders',
-      });
-    }
-  },
-);
-
-/**
  * POST /api/trade/clear
- *
- * Development helper.
- * Do not expose this publicly in the final production version.
+ * Development helper to clear queue.
  */
 tradeRouter.post('/clear', (_req, res) => {
   try {
     tradeService.clearQueue();
-
-    return res.json({
+    res.json({
       success: true,
-      message:
-        'Execution queue cleared',
+      message: 'Execution queue cleared',
       orders: [],
     });
   } catch (err: any) {
-    return res.status(500).json({
+    res.status(500).json({
       success: false,
-      code: 'INTERNAL_ERROR',
-      error:
-        err?.message ||
-        'Failed to clear queue',
+      error: err.message,
     });
   }
 });

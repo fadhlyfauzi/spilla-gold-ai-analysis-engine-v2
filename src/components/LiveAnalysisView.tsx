@@ -51,7 +51,7 @@ import {
 } from 'lucide-react';
 import { CreditWalletModal } from './CreditWalletModal';
 import { InsufficientCreditModal } from './InsufficientCreditModal';
-import { Mt5AccountStatusWidget } from './Mt5AccountStatusWidget';
+import { Mt5AccountStatusWidget, TradingAccountData } from './Mt5AccountStatusWidget';
 
 interface LiveAnalysisViewProps {
   recommendationData?: RecommendationResponse | null;
@@ -259,6 +259,7 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
   const [isExecuting, setIsExecuting] = useState<boolean>(false);
   const [executionResult, setExecutionResult] = useState<CopilotExecutionResponse | null>(null);
   const [modalExecutionError, setModalExecutionError] = useState<string | null>(null);
+  const [connectedAccount, setConnectedAccount] = useState<TradingAccountData | null>(null);
 
   // Phase 1 MT5 Execution Bridge State
   const [dispatchedBanner, setDispatchedBanner] = useState<{
@@ -393,13 +394,15 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
   };
 
   // Dev-Only Handlers for MT5 Bridge Testing
-  const handleClaimNextOrder = async (claimedBy = 'MT5_EA_WORKER_1') => {
+  const handleClaimNextOrder = async (claimedBy?: string) => {
     setIsSimulating(true);
     try {
+      const worker = claimedBy || connectedAccount?.workerId || 'MT5_1019008';
+      const acc = connectedAccount?.accountNumber || '1019008';
       const res = await fetch('/api/trade/claim', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ claimedBy }),
+        body: JSON.stringify({ claimedBy: worker, workerId: worker, accountNumber: acc }),
       });
       const data = await res.json();
       if (data.success && data.order) {
@@ -975,6 +978,18 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
 
     if (!currentParams || isExecuting) return;
 
+    // Pre-flight MT5 Account Verification
+    if (connectedAccount) {
+      if (!connectedAccount.workerOnline) {
+        setModalExecutionError('MT5 WORKER OFFLINE — EA SPILLA Executor pada MT5 tidak terdeteksi aktif dalam 30 detik terakhir.');
+        return;
+      }
+      if (!connectedAccount.executionEnabled) {
+        setModalExecutionError('EKSEKUSI MT5 NON-AKTIF — Aktifkan sakelar MT5 Execution pada panel status akun sebelum mengirim order.');
+        return;
+      }
+    }
+
     // Validation: ensure parameters exist and are not duplicated
     if (!currentParams.signalId || currentParams.entryPrice <= 0) {
       setModalExecutionError('INVALID EXECUTION PARAMETERS — PLEASE RE-RUN ANALYSIS');
@@ -991,11 +1006,11 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
 
     try {
       const digits = currentSymbolSpec.digits || 2;
-      // Single Source of Truth Payload: passed directly from executionParameters with 0 recalculations
+      // Single Source of Truth Payload: passed directly from executionParameters with dynamic tradingAccountId
       const orderPayload: Partial<TradeExecutionOrder> = {
         signalId: currentParams.signalId,
         snapshotId: currentParams.snapshotId,
-        accountId: 'MT5-DEMO-01',
+        tradingAccountId: connectedAccount?.id,
         symbol: currentParams.symbol,
         side: currentParams.side,
         orderType: 'MARKET',
@@ -1016,7 +1031,10 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
 
       const res = await fetch('/api/trade/execute', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(effectiveAuthToken ? { Authorization: `Bearer ${effectiveAuthToken}` } : {}),
+        },
         body: JSON.stringify(orderPayload),
       });
 
@@ -1201,7 +1219,10 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
   return (
     <div className="space-y-6 font-mono">
       {/* MT5 Account Connection & Telemetry Status Widget */}
-      <Mt5AccountStatusWidget authToken={effectiveAuthToken} />
+      <Mt5AccountStatusWidget
+        authToken={effectiveAuthToken}
+        onAccountUpdated={(acc) => setConnectedAccount(acc)}
+      />
 
       {/* Top Banner & Copilot Controller Bar */}
       <div className="bg-[#121620] border border-gray-800 rounded-xl p-5 shadow-xl space-y-4">
@@ -2396,6 +2417,44 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
                 >
                   ✕ CLOSE
                 </button>
+              </div>
+
+              {/* Dynamic MT5 Routing Target Review */}
+              <div className="bg-[#0B0E14] p-3.5 rounded-xl border border-gray-800 space-y-2 text-xs">
+                <div className="flex items-center justify-between pb-1.5 border-b border-gray-800/60">
+                  <span className="text-[10px] font-extrabold text-gray-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <Cpu className="w-3.5 h-3.5 text-[#E5B842]" />
+                    ROUTED MT5 TRADING ACCOUNT
+                  </span>
+                  <span className={`px-2 py-0.5 rounded text-[9px] font-black uppercase ${
+                    connectedAccount?.workerOnline
+                      ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                      : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                  }`}>
+                    {connectedAccount?.workerOnline ? 'WORKER ONLINE' : 'WORKER OFFLINE'}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 text-[11px]">
+                  <div>
+                    <span className="text-gray-500 block text-[10px]">Account Number:</span>
+                    <span className="text-white font-mono font-bold">{connectedAccount?.accountNumber || 'Belum Terhubung'}</span>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 block text-[10px]">Worker ID:</span>
+                    <span className="text-[#E5B842] font-mono font-bold">{connectedAccount?.workerId || 'Auto Assigned'}</span>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 block text-[10px]">Broker / Server:</span>
+                    <span className="text-gray-300 font-sans">{connectedAccount?.broker || 'AIMS'} • {connectedAccount?.brokerServer || '—'}</span>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 block text-[10px]">Execution Switch:</span>
+                    <span className={`font-bold ${connectedAccount?.executionEnabled ? 'text-emerald-400' : 'text-amber-400'}`}>
+                      {connectedAccount?.executionEnabled ? 'ENABLED' : 'DISABLED'}
+                    </span>
+                  </div>
+                </div>
               </div>
 
               {/* Execution Parameter Review: 100% Identical to EXECUTION PARAMETERS BREAKDOWN */}

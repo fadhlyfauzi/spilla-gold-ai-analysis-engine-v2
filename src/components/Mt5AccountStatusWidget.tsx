@@ -51,6 +51,7 @@ export const Mt5AccountStatusWidget: React.FC<Mt5AccountStatusWidgetProps> = ({
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
   const [isDisconnecting, setIsDisconnecting] = useState<boolean>(false);
+  const [isTogglingExecution, setIsTogglingExecution] = useState<boolean>(false);
 
   const fetchAccountStatus = async () => {
     try {
@@ -74,6 +75,34 @@ export const Mt5AccountStatusWidget: React.FC<Mt5AccountStatusWidgetProps> = ({
       console.warn('[Mt5AccountStatusWidget] Fetch accounts error:', err);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleToggleExecution = async () => {
+    if (!account || isTogglingExecution) return;
+    setIsTogglingExecution(true);
+    try {
+      const token = authToken || localStorage.getItem('spilla_token');
+      const targetState = !account.executionEnabled;
+      const res = await fetch(`/api/mt5/accounts/${account.accountNumber}/execution`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ executionEnabled: targetState }),
+      });
+      const data = await res.json();
+      if (data.success && data.account) {
+        setAccount(data.account);
+        if (onAccountUpdated) onAccountUpdated(data.account);
+      } else {
+        alert(data.message || 'Gagal mengubah status eksekusi');
+      }
+    } catch (err) {
+      console.error('[Mt5AccountStatusWidget] Toggle execution error:', err);
+    } finally {
+      setIsTogglingExecution(false);
     }
   };
 
@@ -227,9 +256,26 @@ export const Mt5AccountStatusWidget: React.FC<Mt5AccountStatusWidgetProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Interactive Execution Switch Toggle */}
+            <button
+              onClick={handleToggleExecution}
+              disabled={isTogglingExecution}
+              className={`px-3 py-1.5 rounded-lg text-[10px] font-extrabold border transition-all flex items-center gap-1.5 cursor-pointer active:scale-95 disabled:opacity-50 ${
+                account?.executionEnabled
+                  ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/25 shadow-sm shadow-emerald-500/10'
+                  : 'bg-gray-800/80 border-gray-700 text-gray-400 hover:text-amber-300 hover:border-amber-500/40'
+              }`}
+              title={account?.executionEnabled ? 'Klik untuk menonaktifkan eksekusi MT5' : 'Klik untuk mengaktifkan eksekusi MT5'}
+            >
+              <Shield className={`w-3.5 h-3.5 ${account?.executionEnabled ? 'text-emerald-400' : 'text-gray-400'}`} />
+              <span>
+                EXECUTION: {account?.executionEnabled ? 'ENABLED' : 'DISABLED'}
+              </span>
+            </button>
+
             <button
               onClick={fetchAccountStatus}
-              className="p-1.5 rounded-lg bg-[#141822] hover:bg-gray-800 border border-gray-700 text-gray-300 transition-colors"
+              className="p-1.5 rounded-lg bg-[#141822] hover:bg-gray-800 border border-gray-700 text-gray-300 transition-colors cursor-pointer"
               title="Refresh Status"
             >
               <RefreshCw className="w-3.5 h-3.5" />
@@ -237,7 +283,7 @@ export const Mt5AccountStatusWidget: React.FC<Mt5AccountStatusWidgetProps> = ({
             <button
               onClick={handleDisconnect}
               disabled={isDisconnecting}
-              className="px-2.5 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-400 text-[10px] font-bold transition-colors flex items-center gap-1"
+              className="px-2.5 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-400 text-[10px] font-bold transition-colors flex items-center gap-1 cursor-pointer"
               title="Putuskan Akun"
             >
               <Unlink className="w-3 h-3" />
