@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { ProviderStatus, ProviderType } from '../types.js';
+import { Mt5AccountStatusWidget } from './Mt5AccountStatusWidget.js';
 import {
   Sliders,
   CheckCircle2,
@@ -146,6 +147,9 @@ export const SettingsView: React.FC = () => {
 
   return (
     <div className="space-y-6 font-mono text-xs">
+      {/* MT5 Trading Account Connection Widget */}
+      <Mt5AccountStatusWidget />
+
       {/* 1. Header Banner */}
       <div className="bg-[#121620] border border-gray-800 rounded-xl p-5 flex flex-wrap items-center justify-between gap-4 shadow-xl">
         <div>

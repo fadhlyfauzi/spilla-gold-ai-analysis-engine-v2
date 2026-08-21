@@ -19,6 +19,7 @@ export interface TradingAccountRecord {
   id: string;
   userId?: string | null;
   accountNumber: string;
+  broker?: string | null;
   brokerServer: string;
   accountType: string;
   currency: string;
@@ -46,31 +47,13 @@ class MemoryTradingAccountStore {
 
   private seedDefaults() {
     const now = new Date();
+    // Default demo accounts (unregistered user accounts start empty for user registration testing)
     this.accounts = [
-      {
-        id: 'acc-1019008',
-        userId: 'usr-trader-002',
-        accountNumber: '1019008',
-        brokerServer: 'AIMS-Live',
-        accountType: 'STANDARD',
-        currency: 'USD',
-        workerId: null,
-        symbol: 'XAUUSD.edge',
-        executionEnabled: false,
-        workerOnline: false,
-        lastHeartbeat: null,
-        balance: 10000.0,
-        equity: 10000.0,
-        freeMargin: 10000.0,
-        leverage: 100,
-        isLive: false,
-        createdAt: now,
-        updatedAt: now,
-      },
       {
         id: 'acc-mt5-demo',
         userId: 'usr-trader-002',
         accountNumber: 'MT5-DEMO-01',
+        broker: 'AIMS',
         brokerServer: 'AIMS-Live',
         accountType: 'STANDARD',
         currency: 'USD',
@@ -91,6 +74,7 @@ class MemoryTradingAccountStore {
         id: 'acc-88201923',
         userId: 'usr-trader-002',
         accountNumber: '88201923',
+        broker: 'AIMS',
         brokerServer: 'AIMS-Live',
         accountType: 'PRO',
         currency: 'USD',
@@ -111,6 +95,7 @@ class MemoryTradingAccountStore {
         id: 'acc-88204811',
         userId: 'usr-admin-001',
         accountNumber: '88204811',
+        broker: 'AIMS',
         brokerServer: 'AIMS-Live',
         accountType: 'INSTITUTIONAL',
         currency: 'USD',
@@ -132,8 +117,9 @@ class MemoryTradingAccountStore {
 
   async count(args?: { where?: any }): Promise<number> {
     if (!args?.where) return this.accounts.length;
-    const { accountNumber, workerId } = args.where;
+    const { accountNumber, workerId, userId } = args.where;
     return this.accounts.filter((a) => {
+      if (userId && a.userId !== userId) return false;
       if (accountNumber && a.accountNumber !== accountNumber) return false;
       if (workerId && a.workerId !== workerId) return false;
       return true;
@@ -154,8 +140,9 @@ class MemoryTradingAccountStore {
 
   async findFirst(args?: { where?: any }): Promise<TradingAccountRecord | null> {
     if (!args?.where) return this.accounts[0] || null;
-    const { accountNumber, id, workerId } = args.where;
+    const { accountNumber, id, workerId, userId } = args.where;
     return this.accounts.find((a) => {
+      if (userId && a.userId !== userId) return false;
       if (accountNumber && a.accountNumber !== accountNumber.trim()) return false;
       if (id && a.id !== id) return false;
       if (workerId && a.workerId !== workerId) return false;
@@ -166,8 +153,9 @@ class MemoryTradingAccountStore {
   async findMany(args?: { where?: any; orderBy?: any }): Promise<TradingAccountRecord[]> {
     let list = [...this.accounts];
     if (args?.where) {
-      const { workerOnline, isLive } = args.where;
+      const { workerOnline, isLive, userId } = args.where;
       list = list.filter((a) => {
+        if (userId && a.userId !== userId) return false;
         if (workerOnline !== undefined && a.workerOnline !== workerOnline) return false;
         if (isLive !== undefined && a.isLive !== isLive) return false;
         return true;
@@ -182,6 +170,7 @@ class MemoryTradingAccountStore {
       id: `acc-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
       userId: args.data.userId || null,
       accountNumber: String(args.data.accountNumber).trim(),
+      broker: args.data.broker || 'AIMS',
       brokerServer: args.data.brokerServer || 'AIMS-Live',
       accountType: args.data.accountType || 'STANDARD',
       currency: args.data.currency || 'USD',
@@ -190,10 +179,10 @@ class MemoryTradingAccountStore {
       executionEnabled: args.data.executionEnabled ?? false,
       workerOnline: args.data.workerOnline ?? false,
       lastHeartbeat: args.data.lastHeartbeat || null,
-      balance: args.data.balance !== undefined ? Number(args.data.balance) : 10000.0,
-      equity: args.data.equity !== undefined ? Number(args.data.equity) : 10000.0,
-      freeMargin: args.data.freeMargin !== undefined ? Number(args.data.freeMargin) : 10000.0,
-      leverage: args.data.leverage !== undefined ? Number(args.data.leverage) : 100,
+      balance: args.data.balance !== undefined ? Number(args.data.balance) : 0,
+      equity: args.data.equity !== undefined ? Number(args.data.equity) : 0,
+      freeMargin: args.data.freeMargin !== undefined ? Number(args.data.freeMargin) : 0,
+      leverage: args.data.leverage !== undefined ? Number(args.data.leverage) : 0,
       isLive: args.data.isLive !== undefined ? Boolean(args.data.isLive) : false,
       createdAt: now,
       updatedAt: now,
@@ -219,6 +208,19 @@ class MemoryTradingAccountStore {
     };
     this.accounts[idx] = updated;
     return updated;
+  }
+
+  async delete(args: { where: { accountNumber?: string; id?: string } }): Promise<TradingAccountRecord> {
+    const idx = this.accounts.findIndex((a) => {
+      if (args.where.accountNumber && a.accountNumber === args.where.accountNumber.trim()) return true;
+      if (args.where.id && a.id === args.where.id) return true;
+      return false;
+    });
+    if (idx === -1) {
+      throw new Error(`TradingAccount not found for delete`);
+    }
+    const deleted = this.accounts.splice(idx, 1)[0];
+    return deleted;
   }
 }
 
@@ -422,6 +424,12 @@ export const prisma: any = {
         try { return await (realPrisma as any).tradingAccount.update(args); } catch (err) { useRealPrisma = false; }
       }
       return memoryAccountStore.update(args);
+    },
+    delete: async (args: any) => {
+      if (useRealPrisma && realPrisma) {
+        try { return await (realPrisma as any).tradingAccount.delete(args); } catch (err) { useRealPrisma = false; }
+      }
+      return memoryAccountStore.delete(args);
     },
   },
 };
