@@ -828,8 +828,26 @@ export interface CanonicalExecutionParameters {
 export interface TradeExecutionOrder {
   signalId: string;
   snapshotId: string;
+
+  // ================================================================
+  // MULTI-USER / MULTI-ACCOUNT ROUTING
+  // ================================================================
+  userId?: string;
+  tradingAccountId?: string;
+
+  // Existing account identifier used by the current execution flow
   accountId: string;
 
+  // Real MT5 login/account number for routing and validation
+  accountNumber?: string;
+
+  // Unique EA worker that is allowed to claim this order
+  // Example: MT5_1019008
+  targetWorkerId?: string;
+
+  // ================================================================
+  // TRADE PARAMETERS
+  // ================================================================
   symbol: string;
   side: 'BUY' | 'SELL';
 
@@ -854,15 +872,22 @@ export interface TradeExecutionOrder {
 
   status: TradeOrderStatus;
 
-  // Server Validation & MT5 Execution Lifecycle
+  // ================================================================
+  // SERVER VALIDATION & MT5 EXECUTION LIFECYCLE
+  // ================================================================
   riskValidation?: 'PASS' | 'FAIL' | 'BLOCKED';
+
   claimedAt?: string | null;
   claimedBy?: string | null;
+
   processedAt?: string | null;
+
   executedAt?: string | null;
+
   mt5Ticket?: string | null;
   fillPrice?: number | null;
   executedLot?: number | null;
+
   errorCode?: string | null;
   errorMessage?: string | null;
 

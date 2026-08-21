@@ -1,5 +1,6 @@
 // Prisma Schema for SPILLA GOLD Analysis Engine
-// Manages authentication, user accounts, roles, and status
+// Manages authentication, user accounts, trading accounts,
+// multi-user MT5 worker routing, roles, and execution status.
 
 generator client {
   provider = "prisma-client-js"
@@ -51,87 +52,170 @@ model User {
   accountType String?  @default("Trader Individu")
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+
+  tradingAccounts TradingAccount[]
 }
 
 model TradingAccount {
-  id            String              @id @default(uuid())
-  userId        String?
-  accountNumber String              @unique
-  brokerServer  String              @default("AIMS-Live")
-  accountType   String              @default("STANDARD")
-  currency      String              @default("USD")
-  balance       Float               @default(10000.0)
-  equity        Float               @default(10000.0)
-  freeMargin    Float               @default(10000.0)
-  leverage      Int                 @default(100)
-  isLive        Boolean             @default(true)
-  createdAt     DateTime            @default(now())
-  updatedAt     DateTime            @updatedAt
-  tradePlans    TradePlanSnapshot[]
+  id String @id @default(uuid())
+
+  // ================================================================
+  // ACCOUNT OWNER
+  // ================================================================
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // ================================================================
+  // MT5 / BROKER IDENTITY
+  // ================================================================
+  accountNumber String @unique
+  brokerServer  String @default("AIMS-Live")
+  accountType   String @default("STANDARD")
+  currency      String @default("USD")
+
+  // ================================================================
+  // MULTI-USER EXECUTION ROUTING
+  // ================================================================
+  workerId String? @unique
+
+  // Example:
+  // Website symbol = XAUUSD
+  // Broker symbol  = XAUUSD.edge
+  symbol String @default("XAUUSD")
+
+  executionEnabled Boolean @default(false)
+
+  // ================================================================
+  // WORKER / EA STATUS
+  // ================================================================
+  workerOnline  Boolean   @default(false)
+  lastHeartbeat DateTime?
+
+  // ================================================================
+  // ACCOUNT DATA
+  // ================================================================
+  balance    Float @default(10000.0)
+  equity     Float @default(10000.0)
+  freeMargin Float @default(10000.0)
+  leverage   Int   @default(100)
+
+  isLive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ================================================================
+  // RELATIONS
+  // ================================================================
+  tradePlans TradePlanSnapshot[]
+
+  @@index([userId])
+  @@index([workerId])
+  @@index([executionEnabled])
 }
 
 model TradePlanSnapshot {
-  id                    String              @id @default(uuid())
-  tradePlanId           String              @unique
-  analysisId            String
-  signalId              String
-  riskValidationId      String
-  tradingAccountId      String?
-  tradingAccount        TradingAccount?     @relation(fields: [tradingAccountId], references: [id])
-  symbol                String              @default("XAUUSD")
-  timeframe             String              @default("H1")
-  marketCondition       MarketConditionEnum @default(BULLISH)
-  action                TradingActionEnum   @default(BUY)
-  confidence            Int                 @default(85)
+  id               String @id @default(uuid())
+  tradePlanId      String @unique
+  analysisId       String
+  signalId         String
+  riskValidationId String
+
+  // ================================================================
+  // TARGET TRADING ACCOUNT
+  // ================================================================
+  tradingAccountId String?
+  tradingAccount   TradingAccount? @relation(fields: [tradingAccountId], references: [id])
+
+  // ================================================================
+  // MARKET / SIGNAL DATA
+  // ================================================================
+  symbol          String              @default("XAUUSD")
+  timeframe       String              @default("H1")
+  marketCondition MarketConditionEnum @default(BULLISH)
+  action          TradingActionEnum   @default(BUY)
+  confidence      Int                 @default(85)
+
   marketPriceAtCreation Float
   bid                   Float
   ask                   Float
-  spreadPoints          Int                 @default(20)
-  
-  entryZoneMin          Float
-  entryZoneMax          Float
-  entryPrice            Float
-  stopLoss              Float
-  takeProfit1           Float
-  takeProfit2           Float
-  takeProfit3           Float?
-  riskRewardRatio       Float
-  
-  riskPercent           Float               @default(1.0)
-  riskAmount            Float               @default(100.0)
-  calculatedLot         Float               @default(0.10)
-  normalizedLot         Float               @default(0.10)
-  estimatedLossAtSl     Float               @default(100.0)
-  
-  isEligible            Boolean             @default(true)
-  validationStatus      String              @default("APPROVED")
-  validationReasons     String
-  validationChecks      String
-  
+  spreadPoints          Int   @default(20)
+
+  // ================================================================
+  // EXECUTION PARAMETERS
+  // ================================================================
+  entryZoneMin Float
+  entryZoneMax Float
+  entryPrice   Float
+  stopLoss     Float
+  takeProfit1  Float
+  takeProfit2  Float
+  takeProfit3  Float?
+
+  riskRewardRatio Float
+
+  // ================================================================
+  // RISK / LOT
+  // ================================================================
+  riskPercent       Float @default(1.0)
+  riskAmount        Float @default(100.0)
+  calculatedLot     Float @default(0.10)
+  normalizedLot     Float @default(0.10)
+  estimatedLossAtSl Float @default(100.0)
+
+  // ================================================================
+  // VALIDATION
+  // ================================================================
+  isEligible        Boolean @default(true)
+  validationStatus  String  @default("APPROVED")
+  validationReasons String
+  validationChecks  String
+
+  // ================================================================
+  // AI / MARKET RATIONALE
+  // ================================================================
   keyDrivers            String
   invalidationCondition String
   marketNarrative       String
-  
-  userConfirmed         Boolean             @default(false)
-  planStatus            PlanStatusEnum      @default(PROPOSED)
-  mt5Ticket             String?
-  executedAt            DateTime?
-  actualFillPrice       Float?
-  
-  createdAt             DateTime            @default(now())
-  expiresAt             DateTime
+
+  // ================================================================
+  // EXECUTION LIFECYCLE
+  // ================================================================
+  userConfirmed Boolean        @default(false)
+  planStatus    PlanStatusEnum @default(PROPOSED)
+
+  mt5Ticket       String?
+  executedAt      DateTime?
+  actualFillPrice Float?
+
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+
+  @@index([tradingAccountId])
+  @@index([signalId])
+  @@index([planStatus])
 }
 
 model CopilotAuditLog {
-  id              String   @id @default(uuid())
-  timestamp       DateTime @default(now())
-  eventType       String
-  userId          String?
-  accountId       String?
-  symbol          String   @default("XAUUSD")
+  id        String   @id @default(uuid())
+  timestamp DateTime @default(now())
+
+  eventType String
+
+  userId    String?
+  accountId String?
+
+  symbol String @default("XAUUSD")
+
   relatedEntityId String?
   idempotencyKey  String?
-  status          String   @default("INFO")
-  reason          String?
-  details         String?
+
+  status  String  @default("INFO")
+  reason  String?
+  details String?
+
+  @@index([userId])
+  @@index([accountId])
+  @@index([eventType])
+  @@index([timestamp])
 }

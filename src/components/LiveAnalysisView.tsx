@@ -991,27 +991,65 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
     try {
       const digits = currentSymbolSpec.digits || 2;
       // Single Source of Truth Payload: passed directly from executionParameters with 0 recalculations
-      const orderPayload: Partial<TradeExecutionOrder> = {
-        signalId: currentParams.signalId,
-        snapshotId: currentParams.snapshotId,
-        accountId: 'MT5-DEMO-01',
-        symbol: currentParams.symbol,
-        side: currentParams.side,
-        orderType: 'MARKET',
-        lot: Number(currentParams.lot.toFixed(2)),
-        capturePrice: Number(currentParams.entryPrice.toFixed(digits)),
-        entryPrice: Number(currentParams.entryPrice.toFixed(digits)),
-        stopLoss: Number(currentParams.stopLoss.toFixed(digits)),
-        takeProfit1: Number(currentParams.takeProfit1.toFixed(digits)),
-        takeProfit2: currentParams.takeProfit2 !== null ? Number(currentParams.takeProfit2.toFixed(digits)) : null,
-        riskPercent: Number(currentParams.riskPercent.toFixed(2)),
-        estimatedLoss: Number(currentParams.estimatedLoss.toFixed(2)),
-        confidence: Number(currentParams.confidence),
-        tradingStyle: currentParams.tradingStyle,
-        timeframe: currentParams.timeframe,
-        status: 'PENDING',
-        createdAt: new Date().toISOString(),
-      };
+const orderPayload = {
+  signalId: currentParams.signalId,
+  snapshotId: currentParams.snapshotId,
+
+  // ============================================================
+  // TARGET MT5 ACCOUNT / WORKER
+  // ============================================================
+  accountId: 'MT5-1019008',
+  accountNumber: '1019008',
+  targetWorkerId: 'MT5_1019008',
+
+  // ============================================================
+  // ORDER
+  // ============================================================
+  symbol: currentParams.symbol,
+  side: currentParams.side,
+  orderType: 'MARKET',
+
+  lot: Number(currentParams.lot.toFixed(2)),
+
+  capturePrice: Number(
+    currentParams.entryPrice.toFixed(digits)
+  ),
+
+  entryPrice: Number(
+    currentParams.entryPrice.toFixed(digits)
+  ),
+
+  stopLoss: Number(
+    currentParams.stopLoss.toFixed(digits)
+  ),
+
+  takeProfit1: Number(
+    currentParams.takeProfit1.toFixed(digits)
+  ),
+
+  takeProfit2:
+    currentParams.takeProfit2 !== null
+      ? Number(currentParams.takeProfit2.toFixed(digits))
+      : null,
+
+  riskPercent: Number(
+    currentParams.riskPercent.toFixed(2)
+  ),
+
+  estimatedLoss: Number(
+    currentParams.estimatedLoss.toFixed(2)
+  ),
+
+  confidence: Number(
+    currentParams.confidence
+  ),
+
+  tradingStyle: currentParams.tradingStyle,
+  timeframe: currentParams.timeframe,
+
+  status: 'PENDING',
+  createdAt: new Date().toISOString(),
+};
 
       const res = await fetch('/api/trade/execute', {
         method: 'POST',
