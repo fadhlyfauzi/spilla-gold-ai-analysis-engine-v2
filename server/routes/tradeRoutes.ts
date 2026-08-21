@@ -7,8 +7,70 @@ export const tradeRouter = Router();
 const prisma = getPrismaClient();
 
 /**
+ * POST /api/trade/validate-gate
+ * Phase 4 Pre-flight Execution Safety & Risk Gate Check
+ */
+tradeRouter.post('/validate-gate', requireAuth, async (req: any, res: any) => {
+  try {
+    const payload = req.body || {};
+    const currentUser = req.currentUser;
+
+    if (!currentUser || !currentUser.id) {
+      return res.status(401).json({
+        valid: false,
+        code: 'UNAUTHORIZED',
+        message: 'Authentication required.',
+      });
+    }
+
+    let tradingAccount: any = null;
+    if (payload.tradingAccountId) {
+      tradingAccount = await prisma.tradingAccount.findUnique({
+        where: { id: String(payload.tradingAccountId).trim() },
+      });
+    } else {
+      tradingAccount = await prisma.tradingAccount.findFirst({
+        where: { userId: currentUser.id },
+        orderBy: { updatedAt: 'desc' },
+      });
+    }
+
+    const gateResult = tradeService.validateExecutionGate(payload, {
+      tradingAccount,
+      currentUser,
+    });
+
+    return res.status(gateResult.statusCode || 200).json({
+      success: gateResult.valid,
+      valid: gateResult.valid,
+      code: gateResult.code,
+      message: gateResult.message,
+      details: gateResult.details,
+      account: tradingAccount
+        ? {
+            accountNumber: tradingAccount.accountNumber,
+            broker: tradingAccount.broker,
+            brokerServer: tradingAccount.brokerServer,
+            workerId: tradingAccount.workerId,
+            workerOnline: isWorkerOnline(tradingAccount.lastHeartbeat),
+            executionEnabled: Boolean(tradingAccount.executionEnabled),
+            symbol: tradingAccount.symbol,
+          }
+        : null,
+    });
+  } catch (err: any) {
+    console.error('[Trade Validate Gate Error]:', err);
+    return res.status(500).json({
+      valid: false,
+      code: 'INTERNAL_ERROR',
+      message: err?.message || 'Server failed to validate execution gate',
+    });
+  }
+});
+
+/**
  * POST /api/trade/execute
- * Phase 3 Secure Dynamic Execution Routing
+ * Phase 4 Server-Side Final Execution Safety & Risk Gate
  *
  * Resolves trading account strictly from:
  * authenticated SPILLA user -> user's connected TradingAccount ->
@@ -71,44 +133,14 @@ tradeRouter.post('/execute', requireAuth, async (req: any, res: any) => {
       }
     }
 
-    // 2. Validate Worker Online Status (Heartbeat within 30s)
-    const workerOnline = isWorkerOnline(tradingAccount.lastHeartbeat);
-    if (!tradingAccount.workerId || !workerOnline) {
-      return res.status(409).json({
-        success: false,
-        code: 'MT5_WORKER_OFFLINE',
-        error: 'ORDER DISPATCH REJECTED',
-        message: `MT5 Worker (${tradingAccount.workerId || 'UNREGISTERED'}) is OFFLINE. Please ensure the SPILLA EA is attached and running in your MT5 terminal.`,
-        account: {
-          accountNumber: tradingAccount.accountNumber,
-          workerId: tradingAccount.workerId,
-          lastHeartbeat: tradingAccount.lastHeartbeat,
-        },
-      });
-    }
-
-    // 3. Validate Execution Switch (executionEnabled === true)
-    if (!tradingAccount.executionEnabled) {
-      return res.status(403).json({
-        success: false,
-        code: 'EXECUTION_DISABLED',
-        error: 'ORDER DISPATCH REJECTED',
-        message: `MT5 execution is DISABLED for account ${tradingAccount.accountNumber}. Enable execution in the MT5 Account settings before dispatching orders.`,
-        account: {
-          accountNumber: tradingAccount.accountNumber,
-          executionEnabled: false,
-        },
-      });
-    }
-
-    // 4. Resolve broker execution symbol from connected account
+    // 2. Resolve broker execution symbol from connected account
     const brokerSymbol =
       tradingAccount.symbol && tradingAccount.symbol.trim()
         ? tradingAccount.symbol.trim()
         : payload.symbol || 'XAUUSD';
 
-    // 5. Enqueue order with server-verified credentials & dynamic routing targets
-    const result = tradeService.executeOrder({
+    // 3. Execute order through authoritative server-side execution & risk gate
+    const orderPayload = {
       ...payload,
       tradingAccountId: tradingAccount.id,
       accountNumber: tradingAccount.accountNumber,
@@ -118,15 +150,21 @@ tradeRouter.post('/execute', requireAuth, async (req: any, res: any) => {
       broker: tradingAccount.broker || 'AIMS',
       brokerServer: tradingAccount.brokerServer || 'AIMS-Live',
       symbol: brokerSymbol,
+    };
+
+    const result = tradeService.executeOrder(orderPayload, {
+      tradingAccount,
+      currentUser,
     });
 
     if (!result.success) {
-      const statusCode = result.code === 'DUPLICATE_SIGNAL' ? 409 : 400;
+      const statusCode = result.statusCode || 400;
       return res.status(statusCode).json({
         success: false,
         code: result.code,
-        error: result.code === 'DUPLICATE_SIGNAL' ? result.message : 'ORDER DISPATCH REJECTED',
+        error: 'ORDER DISPATCH REJECTED',
         message: result.message,
+        details: result.details,
       });
     }
 

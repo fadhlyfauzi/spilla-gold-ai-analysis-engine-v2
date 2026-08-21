@@ -2382,7 +2382,7 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
         </div>
       </div>
 
-      {/* Confirmation & Execution Modal */}
+      {/* Confirmation & Execution Modal with Phase 4 Safety Gate Review */}
       {showConfirmModal && (executionParameters || snapshot) && (() => {
         const params = executionParameters || (snapshot ? createExecutionParametersFromSnapshot(
           snapshot,
@@ -2397,15 +2397,52 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
 
         if (!params) return null;
 
+        // Phase 4 Authoritative Safety Gate Calculation
+        const isAccountConnected = Boolean(connectedAccount?.accountNumber);
+        const isWorkerOnline = Boolean(connectedAccount?.workerOnline);
+        const isExecutionEnabled = Boolean(connectedAccount?.executionEnabled);
+        const isDirectionValid = params.side === 'BUY' || params.side === 'SELL';
+        const isLotValid = params.lot > 0 && isFinite(params.lot) && params.lot <= 100;
+        const isEntryValid = params.entryPrice > 0 && isFinite(params.entryPrice);
+        const isSLValid = params.stopLoss > 0 && (params.side === 'BUY' ? params.stopLoss < params.entryPrice : params.stopLoss > params.entryPrice);
+        const isTPValid = params.takeProfit1 > 0 && (params.side === 'BUY' ? params.takeProfit1 > params.entryPrice : params.takeProfit1 < params.entryPrice);
+
+        const riskDist = Math.abs(params.entryPrice - params.stopLoss);
+        const rewardDist = Math.abs(params.takeProfit1 - params.entryPrice);
+        const calculatedRR = riskDist > 0 && rewardDist > 0 ? Number((rewardDist / riskDist).toFixed(2)) : 0;
+        const minRequiredRR = params.tradingStyle === 'SCALPING' ? 1.20 : 1.50;
+        const isRiskRewardPass = calculatedRR >= minRequiredRR;
+
+        const isSignalNotDispatched = !dispatchedSignalIds.includes(params.signalId);
+        const isPlanEligible = snapshot ? (snapshot.eligibility?.eligible !== false) : true;
+
+        const failedGateReasons: string[] = [];
+        if (!isAccountConnected) failedGateReasons.push('No MT5 trading account connected.');
+        if (!isWorkerOnline) failedGateReasons.push(`MT5 Worker (${connectedAccount?.workerId || 'UNREGISTERED'}) is OFFLINE.`);
+        if (!isExecutionEnabled) failedGateReasons.push(`MT5 Execution is DISABLED for account ${connectedAccount?.accountNumber || ''}.`);
+        if (!isDirectionValid) failedGateReasons.push(`Direction '${params.side}' is invalid.`);
+        if (!isLotValid) failedGateReasons.push(`Lot size (${params.lot}) is invalid.`);
+        if (!isEntryValid) failedGateReasons.push(`Entry price ($${params.entryPrice}) is invalid.`);
+        if (!isSLValid) failedGateReasons.push(`Stop Loss ($${params.stopLoss}) must be ${params.side === 'BUY' ? 'below' : 'above'} Entry ($${params.entryPrice}).`);
+        if (!isTPValid) failedGateReasons.push(`Take Profit ($${params.takeProfit1}) must be ${params.side === 'BUY' ? 'above' : 'below'} Entry ($${params.entryPrice}).`);
+        if (!isRiskRewardPass) failedGateReasons.push(`Risk/Reward (1:${calculatedRR.toFixed(2)}) is below minimum required 1:${minRequiredRR.toFixed(2)} for ${params.tradingStyle || 'INTRADAY'}.`);
+        if (!isSignalNotDispatched) failedGateReasons.push('Signal has already been dispatched to MT5.');
+        if (!isPlanEligible) failedGateReasons.push('AI Trade Plan analysis is marked NOT ELIGIBLE for execution.');
+
+        const allGatesPass = failedGateReasons.length === 0;
+
         return (
-          <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-            <div className="bg-[#121620] border border-gray-800 rounded-2xl max-w-lg w-full p-6 space-y-5 shadow-2xl">
+          <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 overflow-y-auto">
+            <div className="bg-[#121620] border border-gray-800 rounded-2xl max-w-lg w-full p-6 space-y-4 shadow-2xl my-8">
               <div className="flex items-center justify-between pb-3 border-b border-gray-800">
                 <div className="flex items-center space-x-2">
-                  <ShieldCheck className="w-6 h-6 text-emerald-400" />
-                  <h3 className="text-sm font-extrabold text-white tracking-wider">
-                    CONFIRM {params.side} ORDER EXECUTION
-                  </h3>
+                  <ShieldCheck className={`w-6 h-6 ${allGatesPass ? 'text-emerald-400' : 'text-rose-400'}`} />
+                  <div>
+                    <h3 className="text-sm font-extrabold text-white tracking-wider">
+                      CONFIRM {params.side} ORDER EXECUTION
+                    </h3>
+                    <span className="text-[10px] text-gray-400 font-mono">PHASE 4 SAFETY & RISK GATE</span>
+                  </div>
                 </div>
                 <button
                   onClick={() => {
@@ -2429,7 +2466,7 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
                   <span className={`px-2 py-0.5 rounded text-[9px] font-black uppercase ${
                     connectedAccount?.workerOnline
                       ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                      : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                      : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
                   }`}>
                     {connectedAccount?.workerOnline ? 'WORKER ONLINE' : 'WORKER OFFLINE'}
                   </span>
@@ -2450,24 +2487,24 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
                   </div>
                   <div>
                     <span className="text-gray-500 block text-[10px]">Execution Switch:</span>
-                    <span className={`font-bold ${connectedAccount?.executionEnabled ? 'text-emerald-400' : 'text-amber-400'}`}>
+                    <span className={`font-bold ${connectedAccount?.executionEnabled ? 'text-emerald-400' : 'text-rose-400'}`}>
                       {connectedAccount?.executionEnabled ? 'ENABLED' : 'DISABLED'}
                     </span>
                   </div>
                 </div>
               </div>
 
-              {/* Execution Parameter Review: 100% Identical to EXECUTION PARAMETERS BREAKDOWN */}
-              <div className="bg-[#0B0E14] p-4 rounded-xl border border-gray-800 space-y-2.5 text-xs">
-                <div className="flex justify-between items-center pb-2 border-b border-gray-800/60">
-                  <span className="text-gray-400">Signal ID:</span>
-                  <span className="font-mono text-amber-300 font-black text-xs">
+              {/* Execution Parameter Review */}
+              <div className="bg-[#0B0E14] p-3.5 rounded-xl border border-gray-800 space-y-2 text-xs">
+                <div className="flex justify-between items-center pb-1.5 border-b border-gray-800/60">
+                  <span className="text-gray-400 text-[11px]">Signal ID:</span>
+                  <span className="font-mono text-amber-300 font-bold text-xs">
                     {params.signalId}
                   </span>
                 </div>
-                <div className="flex justify-between items-center pb-2 border-b border-gray-800/60">
-                  <span className="text-gray-400">Symbol & Side:</span>
-                  <span className={`font-black text-sm px-2 py-0.5 rounded ${
+                <div className="flex justify-between items-center pb-1.5 border-b border-gray-800/60">
+                  <span className="text-gray-400 text-[11px]">Symbol & Side:</span>
+                  <span className={`font-black text-xs px-2 py-0.5 rounded ${
                     params.side === 'BUY'
                       ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
                       : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
@@ -2475,37 +2512,97 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
                     {params.symbol} • {params.side}
                   </span>
                 </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-gray-400">Calculated Volume (Lot):</span>
-                  <span className="text-blue-400 font-extrabold text-sm">{params.lot.toFixed(2)} Lots</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-gray-400">Entry Price:</span>
-                  <span className="text-white font-bold font-mono">${params.entryPrice.toFixed(currentSymbolSpec.digits || 2)}</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-gray-400">Stop Loss:</span>
-                  <span className="text-rose-400 font-bold font-mono">${params.stopLoss.toFixed(currentSymbolSpec.digits || 2)}</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-gray-400">Take Profit 1:</span>
-                  <span className="text-emerald-400 font-bold font-mono">${params.takeProfit1.toFixed(currentSymbolSpec.digits || 2)}</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-gray-400">Take Profit 2:</span>
-                  <span className="text-emerald-400 font-bold font-mono">
-                    {params.takeProfit2 !== null && params.takeProfit2 !== undefined ? `$${params.takeProfit2.toFixed(currentSymbolSpec.digits || 2)}` : '—'}
-                  </span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-gray-400">Risk Percent:</span>
-                  <span className="text-amber-300 font-bold">{params.riskPercent}%</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-gray-400">Max Estimated Loss at SL:</span>
-                  <span className="text-rose-400 font-bold font-mono">${params.estimatedLoss.toFixed(2)}</span>
+                <div className="grid grid-cols-2 gap-2 text-[11px]">
+                  <div>
+                    <span className="text-gray-500 block text-[10px]">Calculated Volume:</span>
+                    <span className="text-blue-400 font-extrabold font-mono">{params.lot.toFixed(2)} Lots</span>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 block text-[10px]">Entry Price:</span>
+                    <span className="text-white font-bold font-mono">${params.entryPrice.toFixed(currentSymbolSpec.digits || 2)}</span>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 block text-[10px]">Stop Loss:</span>
+                    <span className="text-rose-400 font-bold font-mono">${params.stopLoss.toFixed(currentSymbolSpec.digits || 2)}</span>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 block text-[10px]">Take Profit 1:</span>
+                    <span className="text-emerald-400 font-bold font-mono">${params.takeProfit1.toFixed(currentSymbolSpec.digits || 2)}</span>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 block text-[10px]">Risk/Reward Ratio:</span>
+                    <span className={`font-bold font-mono ${isRiskRewardPass ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      1 : {calculatedRR.toFixed(2)} {isRiskRewardPass ? '✓' : `(Min 1:${minRequiredRR.toFixed(2)})`}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 block text-[10px]">Risk % / Max Loss:</span>
+                    <span className="text-amber-300 font-bold font-mono">{params.riskPercent}% (${params.estimatedLoss.toFixed(2)})</span>
+                  </div>
                 </div>
               </div>
+
+              {/* FINAL SAFETY STATUS CHECKLIST */}
+              <div className="bg-[#0B0E14] p-3.5 rounded-xl border border-gray-800 space-y-2 text-xs">
+                <span className="text-[10px] font-extrabold text-gray-400 uppercase tracking-wider flex items-center gap-1.5 pb-1 border-b border-gray-800/60">
+                  <Shield className="w-3.5 h-3.5 text-blue-400" />
+                  SAFETY & RISK GATE VALIDATION
+                </span>
+
+                <div className="space-y-1.5 text-[11px]">
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-400">1. Account Connected:</span>
+                    <span className={isAccountConnected ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+                      {isAccountConnected ? 'PASS ✓' : 'FAIL (No Account)'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-400">2. MT5 Worker Online:</span>
+                    <span className={isWorkerOnline ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+                      {isWorkerOnline ? 'PASS ✓ (Online)' : 'FAIL (Offline)'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-400">3. MT5 Execution Permission:</span>
+                    <span className={isExecutionEnabled ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+                      {isExecutionEnabled ? 'PASS ✓ (Enabled)' : 'FAIL (Disabled)'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-400">4. Risk / Reward Minimum (≥ 1:{minRequiredRR.toFixed(2)}):</span>
+                    <span className={isRiskRewardPass ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+                      {isRiskRewardPass ? `PASS ✓ (1:${calculatedRR.toFixed(2)})` : `FAIL (1:${calculatedRR.toFixed(2)} < 1:${minRequiredRR.toFixed(2)})`}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-400">5. Direction & Structure (SL/TP):</span>
+                    <span className={isSLValid && isTPValid ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+                      {isSLValid && isTPValid ? 'PASS ✓' : 'FAIL (Invalid Levels)'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-400">6. Trade Plan Eligibility:</span>
+                    <span className={isPlanEligible ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+                      {isPlanEligible ? 'PASS ✓' : 'FAIL (Restricted)'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Execution Blocked Banner if Any Gate Fails */}
+              {!allGatesPass && (
+                <div className="p-3.5 rounded-xl border border-rose-500/40 bg-rose-500/10 text-rose-300 text-xs space-y-1.5">
+                  <div className="font-extrabold flex items-center gap-1.5 text-rose-400">
+                    <AlertTriangle className="w-4 h-4 text-rose-400" />
+                    EXECUTION BLOCKED — SAFETY CRITERIA NOT MET
+                  </div>
+                  <ul className="list-disc pl-4 space-y-0.5 text-[11px]">
+                    {failedGateReasons.map((r, i) => (
+                      <li key={i}>{r}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
 
               {/* Error Notification Alert in Modal */}
               {modalExecutionError && (
@@ -2556,15 +2653,26 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
                 {!executionResult?.success && (
                   <button
                     onClick={handleExecuteOrder}
-                    disabled={isExecuting}
-                    className={`flex-1 py-3 rounded-xl text-black font-extrabold text-xs transition-all flex items-center justify-center gap-2 cursor-pointer shadow-lg disabled:opacity-50 ${
-                      params.side === 'BUY'
-                        ? 'bg-emerald-500 hover:bg-emerald-600 shadow-emerald-500/20'
-                        : 'bg-rose-500 hover:bg-rose-600 shadow-rose-500/20'
+                    disabled={isExecuting || !allGatesPass}
+                    className={`flex-1 py-3 rounded-xl font-extrabold text-xs transition-all flex items-center justify-center gap-2 shadow-lg ${
+                      !allGatesPass
+                        ? 'bg-[#1a1f2c] text-rose-400/80 border border-rose-500/30 cursor-not-allowed opacity-80'
+                        : params.side === 'BUY'
+                        ? 'bg-emerald-500 hover:bg-emerald-600 text-black shadow-emerald-500/20 cursor-pointer'
+                        : 'bg-rose-500 hover:bg-rose-600 text-black shadow-rose-500/20 cursor-pointer'
                     }`}
                   >
-                    <Zap className={`w-4 h-4 text-black ${isExecuting ? 'animate-spin' : ''}`} />
-                    <span>{isExecuting ? 'DISPATCHING TO MT5...' : `DISPATCH ${params.side} ORDER`}</span>
+                    {!allGatesPass ? (
+                      <>
+                        <ShieldAlert className="w-4 h-4 text-rose-400" />
+                        <span>EXECUTION BLOCKED</span>
+                      </>
+                    ) : (
+                      <>
+                        <Zap className={`w-4 h-4 text-black ${isExecuting ? 'animate-spin' : ''}`} />
+                        <span>{isExecuting ? 'DISPATCHING TO MT5...' : `DISPATCH ${params.side} ORDER`}</span>
+                      </>
+                    )}
                   </button>
                 )}
               </div>

@@ -6,6 +6,33 @@ export const CLAIM_TIMEOUT_MS = 60 * 1000; // 60 seconds claim timeout protectio
 // Pre-authorized MT5 accounts (demo & live)
 export const AUTHORIZED_ACCOUNTS = new Set(['MT5-DEMO-01', 'MT5-LIVE-01', 'MT5-PRO-01', 'MT5-XAUUSD-01']);
 
+export interface ExecutionGateContext {
+  tradingAccount?: {
+    id: string;
+    userId: string;
+    accountNumber: string;
+    workerId?: string | null;
+    lastHeartbeat?: string | Date | null;
+    executionEnabled: boolean;
+    broker?: string | null;
+    brokerServer?: string | null;
+    symbol?: string | null;
+  } | null;
+  currentUser?: {
+    id: string;
+    email?: string;
+    role?: string;
+  } | null;
+}
+
+export interface ExecutionGateResult {
+  valid: boolean;
+  statusCode: number;
+  code: string;
+  message: string;
+  details?: any;
+}
+
 export class TradeService {
   private queue: TradeExecutionOrder[] = [];
   private dispatchedSignals: Set<string> = new Set();
@@ -43,16 +70,334 @@ export class TradeService {
   }
 
   /**
+   * Phase 4: Server-Side Final Execution Safety & Risk Gate.
+   * Performs authoritative security, risk, trade-plan, and parameter validation.
+   */
+  public validateExecutionGate(
+    payload: Partial<TradeExecutionOrder> & {
+      isEligible?: boolean;
+      eligibility?: { eligible: boolean; reasons?: string[]; codes?: string[] };
+      validationStatus?: string;
+      expiresAt?: string;
+    },
+    context?: ExecutionGateContext
+  ): ExecutionGateResult {
+    const { tradingAccount, currentUser } = context || {};
+
+    // 1. Account Ownership Check (Mandatory if user context provided)
+    if (currentUser && currentUser.id) {
+      if (!tradingAccount) {
+        return {
+          valid: false,
+          statusCode: 404,
+          code: 'NO_TRADING_ACCOUNT',
+          message: 'No connected MT5 trading account found for authenticated user.',
+        };
+      }
+
+      if (tradingAccount.userId && tradingAccount.userId !== currentUser.id && currentUser.role !== 'ADMIN') {
+        return {
+          valid: false,
+          statusCode: 403,
+          code: 'ACCOUNT_OWNERSHIP_MISMATCH',
+          message: 'Trading account does not belong to authenticated user.',
+        };
+      }
+    }
+
+    // 2. MT5 Worker Online Check (< 30s Heartbeat)
+    if (tradingAccount) {
+      const now = Date.now();
+      const lastHb = tradingAccount.lastHeartbeat ? new Date(tradingAccount.lastHeartbeat).getTime() : 0;
+      const workerOnline = Boolean(tradingAccount.workerId && lastHb > 0 && now - lastHb <= 30 * 1000);
+
+      if (!tradingAccount.workerId || !workerOnline) {
+        return {
+          valid: false,
+          statusCode: 409,
+          code: 'MT5_WORKER_OFFLINE',
+          message: `MT5 Worker (${tradingAccount.workerId || 'UNREGISTERED'}) is OFFLINE. SPILLA EA heartbeat not detected within 30 seconds.`,
+          details: {
+            accountNumber: tradingAccount.accountNumber,
+            workerId: tradingAccount.workerId,
+            lastHeartbeat: tradingAccount.lastHeartbeat,
+          },
+        };
+      }
+
+      // 3. Execution Switch Check (executionEnabled === true)
+      if (!tradingAccount.executionEnabled) {
+        return {
+          valid: false,
+          statusCode: 403,
+          code: 'EXECUTION_DISABLED',
+          message: `Execution is disabled for trading account ${tradingAccount.accountNumber}.`,
+          details: {
+            accountNumber: tradingAccount.accountNumber,
+            executionEnabled: false,
+          },
+        };
+      }
+    }
+
+    // 4. Signal ID Validation & Idempotency / Duplicate Check
+    const signalId = payload.signalId;
+    if (!signalId || typeof signalId !== 'string' || signalId.trim() === '') {
+      return {
+        valid: false,
+        statusCode: 400,
+        code: 'INVALID_SIGNAL_ID',
+        message: 'ORDER DISPATCH REJECTED: Valid unique signalId is required.',
+      };
+    }
+
+    const cleanSignalId = signalId.trim();
+    if (
+      this.dispatchedSignals.has(cleanSignalId) ||
+      this.queue.some((o) => o.signalId === cleanSignalId && o.status !== 'REJECTED' && o.status !== 'FAILED')
+    ) {
+      return {
+        valid: false,
+        statusCode: 409,
+        code: 'DUPLICATE_SIGNAL',
+        message: 'DUPLICATE SIGNAL — ORDER ALREADY DISPATCHED',
+      };
+    }
+
+    // 5. Trade Plan Actionability Check (strictly BUY or SELL)
+    const side = payload.side;
+    if (side !== 'BUY' && side !== 'SELL') {
+      return {
+        valid: false,
+        statusCode: 400,
+        code: 'TRADE_NOT_ACTIONABLE',
+        message: `Trade is not actionable. Order side must be strictly BUY or SELL (received: ${side || 'NONE'}).`,
+      };
+    }
+
+    // 6. Eligibility & Validation Status Gate
+    if (payload.isEligible === false || payload.eligibility?.eligible === false) {
+      return {
+        valid: false,
+        statusCode: 400,
+        code: 'TRADE_NOT_ELIGIBLE',
+        message: 'ORDER DISPATCH REJECTED: Trade plan is marked as NOT ELIGIBLE by deterministic validation.',
+        details: {
+          reasons: payload.eligibility?.reasons || ['Trade eligibility failed deterministic risk validation'],
+        },
+      };
+    }
+
+    if (payload.validationStatus && ['REJECTED', 'NO_TRADE', 'FAIL'].includes(payload.validationStatus.toUpperCase())) {
+      return {
+        valid: false,
+        statusCode: 400,
+        code: 'TRADE_NOT_ELIGIBLE',
+        message: `ORDER DISPATCH REJECTED: Validation status is ${payload.validationStatus}.`,
+      };
+    }
+
+    if (payload.riskValidation && payload.riskValidation !== 'PASS') {
+      return {
+        valid: false,
+        statusCode: 400,
+        code: 'RISK_VALIDATION_FAILED',
+        message: `ORDER DISPATCH REJECTED: Risk Validation must be PASS (received: ${payload.riskValidation}).`,
+      };
+    }
+
+    // 7. Signal Expiration Check
+    if (payload.expiresAt) {
+      const expiryTime = new Date(payload.expiresAt).getTime();
+      if (!isNaN(expiryTime) && Date.now() >= expiryTime) {
+        return {
+          valid: false,
+          statusCode: 400,
+          code: 'SIGNAL_EXPIRED',
+          message: 'ORDER DISPATCH REJECTED: Trade plan has expired. Please run a fresh analysis.',
+        };
+      }
+    }
+
+    // 8. Numeric Lot / Volume Safety Validation
+    const numericLot = Number(payload.lot);
+    if (isNaN(numericLot) || !isFinite(numericLot) || numericLot <= 0) {
+      return {
+        valid: false,
+        statusCode: 400,
+        code: 'INVALID_VOLUME',
+        message: 'ORDER DISPATCH REJECTED: Lot size must be a positive finite number greater than 0.',
+      };
+    }
+
+    // 9. Entry Price Validation
+    const numEntry = Number(payload.entryPrice);
+    if (isNaN(numEntry) || !isFinite(numEntry) || numEntry <= 0) {
+      return {
+        valid: false,
+        statusCode: 400,
+        code: 'INVALID_ENTRY_PRICE',
+        message: 'ORDER DISPATCH REJECTED: Entry price must be a positive number greater than 0.',
+      };
+    }
+
+    // 10. Stop Loss Validation
+    const numSL = Number(payload.stopLoss);
+    if (isNaN(numSL) || !isFinite(numSL) || numSL <= 0) {
+      return {
+        valid: false,
+        statusCode: 400,
+        code: 'INVALID_STOP_LOSS',
+        message: 'ORDER DISPATCH REJECTED: Stop Loss level is required and must be greater than 0.',
+      };
+    }
+
+    // 11. Take Profit 1 Validation
+    const numTP1 = Number(payload.takeProfit1);
+    if (isNaN(numTP1) || !isFinite(numTP1) || numTP1 <= 0) {
+      return {
+        valid: false,
+        statusCode: 400,
+        code: 'INVALID_TAKE_PROFIT',
+        message: 'ORDER DISPATCH REJECTED: Take Profit 1 level is required and must be greater than 0.',
+      };
+    }
+
+    // 12. Structural Stop Loss & Take Profit Direction Validation
+    if (side === 'BUY') {
+      if (numSL >= numEntry) {
+        return {
+          valid: false,
+          statusCode: 400,
+          code: 'INVALID_STOP_LOSS',
+          message: `ORDER DISPATCH REJECTED: For BUY order, Stop Loss ($${numSL}) must be strictly below Entry ($${numEntry}).`,
+        };
+      }
+      if (numTP1 <= numEntry) {
+        return {
+          valid: false,
+          statusCode: 400,
+          code: 'INVALID_TAKE_PROFIT',
+          message: `ORDER DISPATCH REJECTED: For BUY order, Take Profit ($${numTP1}) must be strictly above Entry ($${numEntry}).`,
+        };
+      }
+      if (payload.takeProfit2 && Number(payload.takeProfit2) > 0) {
+        const numTP2 = Number(payload.takeProfit2);
+        if (numTP2 <= numTP1) {
+          return {
+            valid: false,
+            statusCode: 400,
+            code: 'INVALID_TAKE_PROFIT',
+            message: `ORDER DISPATCH REJECTED: For BUY order, Take Profit 2 ($${numTP2}) must be strictly higher than Take Profit 1 ($${numTP1}).`,
+          };
+        }
+      }
+    } else if (side === 'SELL') {
+      if (numSL <= numEntry) {
+        return {
+          valid: false,
+          statusCode: 400,
+          code: 'INVALID_STOP_LOSS',
+          message: `ORDER DISPATCH REJECTED: For SELL order, Stop Loss ($${numSL}) must be strictly above Entry ($${numEntry}).`,
+        };
+      }
+      if (numTP1 >= numEntry) {
+        return {
+          valid: false,
+          statusCode: 400,
+          code: 'INVALID_TAKE_PROFIT',
+          message: `ORDER DISPATCH REJECTED: For SELL order, Take Profit ($${numTP1}) must be strictly below Entry ($${numEntry}).`,
+        };
+      }
+      if (payload.takeProfit2 && Number(payload.takeProfit2) > 0) {
+        const numTP2 = Number(payload.takeProfit2);
+        if (numTP2 >= numTP1) {
+          return {
+            valid: false,
+            statusCode: 400,
+            code: 'INVALID_TAKE_PROFIT',
+            message: `ORDER DISPATCH REJECTED: For SELL order, Take Profit 2 ($${numTP2}) must be strictly lower than Take Profit 1 ($${numTP1}).`,
+          };
+        }
+      }
+    }
+
+    // 13. Risk/Reward HARD GATE (CRITICAL)
+    const risk = side === 'BUY' ? numEntry - numSL : numSL - numEntry;
+    const reward = side === 'BUY' ? numTP1 - numEntry : numEntry - numTP1;
+
+    if (risk <= 0 || reward <= 0) {
+      return {
+        valid: false,
+        statusCode: 400,
+        code: 'INVALID_RISK_REWARD',
+        message: 'ORDER DISPATCH REJECTED: Calculated risk and reward must both be strictly positive.',
+      };
+    }
+
+    const calculatedRR = Number((reward / risk).toFixed(2));
+    const tradingStyle = (payload.tradingStyle || 'INTRADAY').toUpperCase();
+    const minRequiredRR = tradingStyle === 'SCALPING' ? 1.20 : 1.50;
+
+    // Hard block if R/R is below required minimum threshold
+    if (calculatedRR < minRequiredRR) {
+      return {
+        valid: false,
+        statusCode: 400,
+        code: 'RISK_REWARD_BELOW_MINIMUM',
+        message: `ORDER DISPATCH REJECTED: Risk/Reward ratio (1:${calculatedRR.toFixed(2)}) is below the required minimum efficiency of 1:${minRequiredRR.toFixed(2)} for ${tradingStyle}.`,
+        details: {
+          actual: calculatedRR,
+          required: minRequiredRR,
+          tradingStyle,
+        },
+      };
+    }
+
+    return {
+      valid: true,
+      statusCode: 200,
+      code: 'GATE_PASSED',
+      message: 'All execution safety and risk gate checks passed successfully.',
+    };
+  }
+
+  /**
    * 1. Hardened Server-Side Validation & Enqueue
    */
-  public executeOrder(payload: Partial<TradeExecutionOrder>): {
+  public executeOrder(
+    payload: Partial<TradeExecutionOrder> & {
+      isEligible?: boolean;
+      eligibility?: { eligible: boolean; reasons?: string[]; codes?: string[] };
+      validationStatus?: string;
+      expiresAt?: string;
+    },
+    context?: ExecutionGateContext
+  ): {
     success: boolean;
+    statusCode?: number;
     code: string;
     message: string;
+    details?: any;
     order?: TradeExecutionOrder;
   } {
     // Always sweep expired claims first
     this.checkClaimTimeouts();
+
+    // Perform Phase 4 Server-Side Final Execution Gate
+    const gateCheck = this.validateExecutionGate(payload, context);
+    if (!gateCheck.valid) {
+      console.warn(
+        `[EXECUTION_GATE_BLOCKED] Signal=${payload.signalId || 'NONE'} Code=${gateCheck.code} Reason=${gateCheck.message}`
+      );
+      return {
+        success: false,
+        statusCode: gateCheck.statusCode,
+        code: gateCheck.code,
+        message: gateCheck.message,
+        details: gateCheck.details,
+      };
+    }
 
     const {
       signalId,
@@ -78,153 +423,20 @@ export class TradeService {
       confidence = 80,
       tradingStyle = 'INTRADAY',
       timeframe = 'H1',
-      riskValidation = 'PASS',
     } = payload;
 
-    // Rule 1: Signal ID uniqueness & validation
-    if (!signalId || typeof signalId !== 'string' || signalId.trim() === '') {
-      return {
-        success: false,
-        code: 'INVALID_SIGNAL_ID',
-        message: 'ORDER DISPATCH REJECTED: signalId must be unique and valid.',
-      };
-    }
-
-    const cleanSignalId = signalId.trim();
-    if (this.dispatchedSignals.has(cleanSignalId) || this.queue.some((o) => o.signalId === cleanSignalId)) {
-      return {
-        success: false,
-        code: 'DUPLICATE_SIGNAL',
-        message: 'DUPLICATE SIGNAL — ORDER ALREADY DISPATCHED',
-      };
-    }
-
-    // Rule 2: Risk Validation must be PASS
-    if (riskValidation !== 'PASS') {
-      return {
-        success: false,
-        code: 'RISK_VALIDATION_FAILED',
-        message: `ORDER DISPATCH REJECTED: Risk Validation must be PASS (received: ${riskValidation}).`,
-      };
-    }
-
-    // Rule 3: Account verification
+    const cleanSignalId = (signalId as string).trim();
     const resolvedAccount = String(accountNumber || accountId || '').trim();
-    if (!resolvedAccount) {
-      return {
-        success: false,
-        code: 'UNAUTHORIZED_ACCOUNT',
-        message: 'ORDER DISPATCH REJECTED: accountId or accountNumber must exist and be authorized.',
-      };
-    }
-
-    // Rule 4: snapshotId must exist and be valid
-    if (!snapshotId || typeof snapshotId !== 'string' || snapshotId.trim() === '') {
-      return {
-        success: false,
-        code: 'INVALID_SNAPSHOT',
-        message: 'ORDER DISPATCH REJECTED: snapshotId must exist and be valid.',
-      };
-    }
-
-    // Rule 5: Symbol validation
-    if (!symbol || typeof symbol !== 'string' || symbol.trim() === '') {
-      return {
-        success: false,
-        code: 'INVALID_SYMBOL',
-        message: 'ORDER DISPATCH REJECTED: Symbol is invalid.',
-      };
-    }
-
-    // Rule 6: Side validation
-    if (side !== 'BUY' && side !== 'SELL') {
-      return {
-        success: false,
-        code: 'INVALID_SIDE',
-        message: 'ORDER DISPATCH REJECTED: Order side must be BUY or SELL.',
-      };
-    }
-
-    // Rule 7: lot > 0 validation
     const numericLot = Number(lot);
-    if (isNaN(numericLot) || numericLot <= 0) {
-      return {
-        success: false,
-        code: 'INVALID_LOT',
-        message: 'ORDER DISPATCH REJECTED: lot size must be strictly greater than 0.',
-      };
-    }
-
-    // Rule 8: Entry price validation
     const numEntry = Number(entryPrice);
-    if (isNaN(numEntry) || numEntry <= 0) {
-      return {
-        success: false,
-        code: 'INVALID_ENTRY_PRICE',
-        message: 'ORDER DISPATCH REJECTED: Entry price must be greater than 0.',
-      };
-    }
-
-    // Rule 9: Stop Loss validation
     const numSL = Number(stopLoss);
-    if (isNaN(numSL) || numSL <= 0) {
-      return {
-        success: false,
-        code: 'INVALID_STOP_LOSS',
-        message: 'ORDER DISPATCH REJECTED: Stop Loss level is required and must be > 0.',
-      };
-    }
-
-    // Rule 10: Take Profit 1 validation
     const numTP1 = Number(takeProfit1);
-    if (isNaN(numTP1) || numTP1 <= 0) {
-      return {
-        success: false,
-        code: 'INVALID_TAKE_PROFIT',
-        message: 'ORDER DISPATCH REJECTED: Take Profit 1 level is required and must be > 0.',
-      };
-    }
-
-    // Rule 11: BUY rule: SL < Entry < TP
-    if (side === 'BUY') {
-      if (numSL >= numEntry) {
-        return {
-          success: false,
-          code: 'INVALID_BUY_SL',
-          message: `ORDER DISPATCH REJECTED: For BUY order, Stop Loss ($${numSL}) must be strictly below Entry ($${numEntry}).`,
-        };
-      }
-      if (numEntry >= numTP1) {
-        return {
-          success: false,
-          code: 'INVALID_BUY_TP',
-          message: `ORDER DISPATCH REJECTED: For BUY order, Entry ($${numEntry}) must be strictly below Take Profit ($${numTP1}).`,
-        };
-      }
-    }
-
-    // Rule 12: SELL rule: TP < Entry < SL
-    if (side === 'SELL') {
-      if (numTP1 >= numEntry) {
-        return {
-          success: false,
-          code: 'INVALID_SELL_TP',
-          message: `ORDER DISPATCH REJECTED: For SELL order, Take Profit ($${numTP1}) must be strictly below Entry ($${numEntry}).`,
-        };
-      }
-      if (numEntry >= numSL) {
-        return {
-          success: false,
-          code: 'INVALID_SELL_SL',
-          message: `ORDER DISPATCH REJECTED: For SELL order, Entry ($${numEntry}) must be strictly below Stop Loss ($${numSL}).`,
-        };
-      }
-    }
+    const numTP2 = takeProfit2 ? Number(takeProfit2) : null;
 
     // Construct immutable TradeExecutionOrder
     const order: TradeExecutionOrder = {
       signalId: cleanSignalId,
-      snapshotId: String(snapshotId),
+      snapshotId: String(snapshotId || `SNAP-${Date.now()}`),
       accountId: resolvedAccount,
       tradingAccountId: tradingAccountId ? String(tradingAccountId) : undefined,
       accountNumber: resolvedAccount,
@@ -233,14 +445,14 @@ export class TradeService {
       broker: String(broker),
       brokerServer: String(brokerServer),
       symbol: symbol.trim(),
-      side,
+      side: side as 'BUY' | 'SELL',
       orderType: orderType as 'MARKET' | 'LIMIT' | 'STOP',
       lot: Number(numericLot.toFixed(2)),
       capturePrice: capturePrice ? Number(Number(capturePrice).toFixed(3)) : numEntry,
       entryPrice: Number(numEntry.toFixed(3)),
       stopLoss: Number(numSL.toFixed(3)),
       takeProfit1: Number(numTP1.toFixed(3)),
-      takeProfit2: takeProfit2 ? Number(Number(takeProfit2).toFixed(3)) : null,
+      takeProfit2: numTP2 ? Number(numTP2.toFixed(3)) : null,
       riskPercent: Number(Number(riskPercent).toFixed(2)),
       estimatedLoss: Number(Number(estimatedLoss).toFixed(2)),
       confidence: Number(confidence),
@@ -261,18 +473,20 @@ export class TradeService {
       updatedAt: new Date().toISOString(),
     };
 
-    // Register signal to prevent duplicate dispatches
-    this.dispatchedSignals.add(cleanSignalId);
+    // Atomic Insertion into in-memory queue
     this.queue.unshift(order);
+    this.dispatchedSignals.add(cleanSignalId);
 
+    const calculatedRR = Math.abs(numTP1 - numEntry) / Math.abs(numEntry - numSL);
     console.log(
-      `[MT5 BRIDGE] [${MT5_EXECUTION_MODE} MODE] TradeExecutionOrder enqueued: signalId=${order.signalId} targetWorker=${order.targetWorkerId || 'ANY'} account=${order.accountNumber} broker=${order.broker} server=${order.brokerServer} symbol=${order.symbol} side=${order.side} lot=${order.lot} entry=${order.entryPrice} sl=${order.stopLoss} tp1=${order.takeProfit1} status=${order.status}`
+      `[EXECUTION_GATE_PASSED] Signal=${cleanSignalId} Account=${resolvedAccount} Worker=${targetWorkerId || 'ANY'} Side=${side} Lot=${order.lot} Entry=${order.entryPrice} SL=${order.stopLoss} TP=${order.takeProfit1} RR=1:${calculatedRR.toFixed(2)}`
     );
 
     return {
       success: true,
+      statusCode: 200,
       code: 'ORDER_DISPATCHED',
-      message: 'ORDER DISPATCHED ✓',
+      message: `ORDER DISPATCHED ✓ Order ${cleanSignalId} enqueued for MT5 execution.`,
       order,
     };
   }
