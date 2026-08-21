@@ -2414,7 +2414,6 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
         const isRiskRewardPass = calculatedRR >= minRequiredRR;
 
         const isSignalNotDispatched = !dispatchedSignalIds.includes(params.signalId);
-        const isPlanEligible = snapshot ? (snapshot.eligibility?.eligible !== false) : true;
 
         const failedGateReasons: string[] = [];
         if (!isAccountConnected) failedGateReasons.push('No MT5 trading account connected.');
@@ -2427,7 +2426,6 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
         if (!isTPValid) failedGateReasons.push(`Take Profit ($${params.takeProfit1}) must be ${params.side === 'BUY' ? 'above' : 'below'} Entry ($${params.entryPrice}).`);
         if (!isRiskRewardPass) failedGateReasons.push(`Risk/Reward (1:${calculatedRR.toFixed(2)}) is below minimum required 1:${minRequiredRR.toFixed(2)} for ${params.tradingStyle || 'INTRADAY'}.`);
         if (!isSignalNotDispatched) failedGateReasons.push('Signal has already been dispatched to MT5.');
-        if (!isPlanEligible) failedGateReasons.push('AI Trade Plan analysis is marked NOT ELIGIBLE for execution.');
 
         const allGatesPass = failedGateReasons.length === 0;
 
@@ -2581,9 +2579,9 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
                     </span>
                   </div>
                   <div className="flex items-center justify-between">
-                    <span className="text-gray-400">6. Trade Plan Eligibility:</span>
-                    <span className={isPlanEligible ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
-                      {isPlanEligible ? 'PASS ✓' : 'FAIL (Restricted)'}
+                    <span className="text-gray-400">6. AI Plan Advisory:</span>
+                    <span className="text-blue-400 font-bold">
+                      {snapshot?.eligibility?.eligible !== false ? 'ELIGIBLE (Info)' : 'ADVISORY ONLY (Non-Blocking)'}
                     </span>
                   </div>
                 </div>

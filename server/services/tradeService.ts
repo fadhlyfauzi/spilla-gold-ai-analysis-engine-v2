@@ -175,38 +175,7 @@ export class TradeService {
       };
     }
 
-    // 6. Eligibility & Validation Status Gate
-    if (payload.isEligible === false || payload.eligibility?.eligible === false) {
-      return {
-        valid: false,
-        statusCode: 400,
-        code: 'TRADE_NOT_ELIGIBLE',
-        message: 'ORDER DISPATCH REJECTED: Trade plan is marked as NOT ELIGIBLE by deterministic validation.',
-        details: {
-          reasons: payload.eligibility?.reasons || ['Trade eligibility failed deterministic risk validation'],
-        },
-      };
-    }
-
-    if (payload.validationStatus && ['REJECTED', 'NO_TRADE', 'FAIL'].includes(payload.validationStatus.toUpperCase())) {
-      return {
-        valid: false,
-        statusCode: 400,
-        code: 'TRADE_NOT_ELIGIBLE',
-        message: `ORDER DISPATCH REJECTED: Validation status is ${payload.validationStatus}.`,
-      };
-    }
-
-    if (payload.riskValidation && payload.riskValidation !== 'PASS') {
-      return {
-        valid: false,
-        statusCode: 400,
-        code: 'RISK_VALIDATION_FAILED',
-        message: `ORDER DISPATCH REJECTED: Risk Validation must be PASS (received: ${payload.riskValidation}).`,
-      };
-    }
-
-    // 7. Signal Expiration Check
+    // 6. Signal Expiration Check
     if (payload.expiresAt) {
       const expiryTime = new Date(payload.expiresAt).getTime();
       if (!isNaN(expiryTime) && Date.now() >= expiryTime) {
@@ -219,7 +188,7 @@ export class TradeService {
       }
     }
 
-    // 8. Numeric Lot / Volume Safety Validation
+    // 7. Numeric Lot / Volume Safety Validation
     const numericLot = Number(payload.lot);
     if (isNaN(numericLot) || !isFinite(numericLot) || numericLot <= 0) {
       return {
