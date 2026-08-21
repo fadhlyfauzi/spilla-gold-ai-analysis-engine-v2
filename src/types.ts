@@ -876,7 +876,46 @@ export interface TradeExecutionOrder {
   updatedAt?: string;
 }
 
+export type Mt5ProvisioningStatus = 'WAITING FOR MT5' | 'PROCESSING' | 'ONLINE' | 'OFFLINE';
+
+export interface AdminTradingAccountRecord {
+  id: string;
+  userId?: string | null;
+  userName: string;
+  userEmail: string;
+  userAccountType?: string;
+  broker: string;
+  accountNumber: string;
+  brokerServer: string;
+  accountType?: string;
+  currency?: string;
+  workerId?: string | null;
+  symbol: string;
+  executionEnabled: boolean;
+  workerOnline: boolean;
+  lastHeartbeat?: string | null;
+  lastHeartbeatAgeSeconds?: number | null;
+  balance: number;
+  equity: number;
+  freeMargin?: number;
+  leverage?: number;
+  isLive?: boolean;
+  status: Mt5ProvisioningStatus;
+  isProcessing?: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AdminMt5ProvisioningStats {
+  total: number;
+  waitingCount: number;
+  onlineCount: number;
+  offlineCount: number;
+  processingCount: number;
+}
+
 export * from './types/credit.js';
+
 
 
 

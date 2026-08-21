@@ -2,8 +2,12 @@ import { Router } from 'express';
 import jwt from 'jsonwebtoken';
 import { prisma } from '../db/prisma.js';
 import { db } from '../db/database.js';
+import { isWorkerOnline } from './mt5WorkerRoutes.js';
 
 export const adminRouter = Router();
+
+// In-memory set to track accounts undergoing manual MT5 provisioning on the central laptop
+const processingAccounts = new Set<string>();
 
 const JWT_SECRET = process.env.JWT_SECRET || 'spilla_gold_institutional_jwt_secret_2026';
 
@@ -212,4 +216,183 @@ adminRouter.get('/trader-logins', requireAdmin, async (req, res) => {
     res.status(500).json({ success: false, message: 'Gagal mengambil data aktivitas login trader.' });
   }
 });
+
+/**
+ * GET /api/admin/mt5/accounts
+ * Admin endpoint: List all registered MT5 TradingAccounts with user information and derived provisioning status
+ */
+adminRouter.get('/mt5/accounts', requireAdmin, async (req, res) => {
+  try {
+    // 1. Fetch all registered trading accounts ordered by newest first
+    const accounts = await prisma.tradingAccount.findMany({
+      orderBy: { createdAt: 'desc' },
+    });
+
+    // 2. Fetch associated users to enrich accounts with user name, email, etc.
+    const userIds = Array.from(new Set(accounts.map((a) => a.userId).filter((id): id is string => Boolean(id))));
+    const users = await prisma.user.findMany({
+      where: { id: { in: userIds } },
+      select: {
+        id: true,
+        fullName: true,
+        email: true,
+        accountType: true,
+      },
+    });
+
+    const userMap = new Map<string, { fullName: string; email: string; accountType?: string | null }>();
+    users.forEach((u) => {
+      userMap.set(u.id, u);
+    });
+
+    // 3. Enrich and derive operational statuses
+    let waitingCount = 0;
+    let onlineCount = 0;
+    let offlineCount = 0;
+    let processingCount = 0;
+
+    const enrichedAccounts = accounts.map((acc) => {
+      const userInfo = acc.userId ? userMap.get(acc.userId) : null;
+      const isOnline = isWorkerOnline(acc.lastHeartbeat);
+      const isProcessing = processingAccounts.has(acc.accountNumber);
+      const hasHeartbeatEver = Boolean(acc.lastHeartbeat);
+
+      let status: 'ONLINE' | 'PROCESSING' | 'WAITING FOR MT5' | 'OFFLINE';
+
+      if (isOnline) {
+        status = 'ONLINE';
+        onlineCount++;
+        // If it was in processing and is now online, clean up from processing set
+        if (isProcessing) {
+          processingAccounts.delete(acc.accountNumber);
+        }
+      } else if (isProcessing) {
+        status = 'PROCESSING';
+        processingCount++;
+      } else if (!hasHeartbeatEver && !acc.workerId) {
+        status = 'WAITING FOR MT5';
+        waitingCount++;
+      } else {
+        status = 'OFFLINE';
+        offlineCount++;
+      }
+
+      const lastHeartbeatAgeSeconds = acc.lastHeartbeat
+        ? Math.floor((Date.now() - new Date(acc.lastHeartbeat).getTime()) / 1000)
+        : null;
+
+      return {
+        id: acc.id,
+        userId: acc.userId,
+        userName: userInfo?.fullName || (acc.userId ? `User (${acc.userId.slice(0, 8)})` : 'Trader Member'),
+        userEmail: userInfo?.email || 'user@spillagold.com',
+        userAccountType: userInfo?.accountType || acc.accountType || 'Trader Individu',
+        broker: acc.broker || 'AIMS',
+        accountNumber: acc.accountNumber,
+        brokerServer: acc.brokerServer || 'AIMS-Live',
+        accountType: acc.accountType || 'STANDARD',
+        currency: acc.currency || 'USD',
+        workerId: acc.workerId,
+        symbol: acc.symbol || 'XAUUSD',
+        executionEnabled: acc.executionEnabled,
+        workerOnline: isOnline,
+        lastHeartbeat: acc.lastHeartbeat ? acc.lastHeartbeat.toISOString() : null,
+        lastHeartbeatAgeSeconds,
+        balance: acc.balance,
+        equity: acc.equity,
+        freeMargin: acc.freeMargin,
+        leverage: acc.leverage,
+        isLive: acc.isLive,
+        status,
+        isProcessing,
+        createdAt: acc.createdAt.toISOString(),
+        updatedAt: acc.updatedAt.toISOString(),
+      };
+    });
+
+    return res.json({
+      success: true,
+      stats: {
+        total: accounts.length,
+        waitingCount,
+        onlineCount,
+        offlineCount,
+        processingCount,
+      },
+      accounts: enrichedAccounts,
+    });
+  } catch (error: any) {
+    console.error('[Admin MT5 Accounts Error]', error);
+    return res.status(500).json({ success: false, message: 'Gagal mengambil antrean provisioning akun MT5.' });
+  }
+});
+
+/**
+ * PATCH /api/admin/mt5/accounts/:accountNumber/processing
+ * Admin action: Mark/unmark an account as being manually processed on central MT5 terminal
+ */
+adminRouter.patch('/mt5/accounts/:accountNumber/processing', requireAdmin, async (req, res) => {
+  try {
+    const accountNumber = String(req.params.accountNumber || '').trim();
+    const { isProcessing } = req.body || {};
+
+    if (!accountNumber) {
+      return res.status(400).json({ success: false, message: 'Nomor akun MT5 wajib diisi.' });
+    }
+
+    if (isProcessing) {
+      processingAccounts.add(accountNumber);
+    } else {
+      processingAccounts.delete(accountNumber);
+    }
+
+    return res.json({
+      success: true,
+      message: `Status provisioning akun ${accountNumber} berhasil diperbarui menjadi ${isProcessing ? 'PROCESSING' : 'PENDING'}.`,
+      accountNumber,
+      isProcessing: processingAccounts.has(accountNumber),
+    });
+  } catch (error: any) {
+    console.error('[Admin Update Processing Status Error]', error);
+    return res.status(500).json({ success: false, message: 'Gagal memperbarui status processing akun MT5.' });
+  }
+});
+
+/**
+ * DELETE /api/admin/mt5/accounts/:accountNumber
+ * Admin action: Remove / disconnect a trading account from the system
+ */
+adminRouter.delete('/mt5/accounts/:accountNumber', requireAdmin, async (req, res) => {
+  try {
+    const accountNumber = String(req.params.accountNumber || '').trim();
+    if (!accountNumber) {
+      return res.status(400).json({ success: false, message: 'Nomor akun MT5 wajib diisi.' });
+    }
+
+    const account = await prisma.tradingAccount.findUnique({
+      where: { accountNumber },
+    });
+
+    if (!account) {
+      return res.status(404).json({ success: false, message: 'Akun trading MT5 tidak ditemukan.' });
+    }
+
+    await prisma.tradingAccount.delete({
+      where: { accountNumber },
+    });
+
+    processingAccounts.delete(accountNumber);
+
+    console.log(`[ADMIN MT5 ACCOUNT REMOVED] Admin=${(req as any).currentUser?.email} Account=${accountNumber}`);
+
+    return res.json({
+      success: true,
+      message: `Akun trading MT5 ${accountNumber} (${account.broker}) berhasil dihapus dari sistem.`,
+    });
+  } catch (error: any) {
+    console.error('[Admin Delete MT5 Account Error]', error);
+    return res.status(500).json({ success: false, message: 'Gagal menghapus akun trading MT5.' });
+  }
+});
+
 

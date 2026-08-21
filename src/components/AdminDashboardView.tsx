@@ -22,9 +22,12 @@ import {
   FileSpreadsheet,
   Layers,
   Coins,
+  Cpu,
+  Terminal,
 } from 'lucide-react';
 import { AuthUser, AdminStats, UserRole, UserStatus, TraderLoginRecord } from '../types';
 import { AdminCreditManagementView } from './AdminCreditManagementView';
+import { AdminMt5ProvisioningView } from './AdminMt5ProvisioningView';
 
 interface AdminDashboardViewProps {
   currentUser: AuthUser;
@@ -39,8 +42,9 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   onNavigateToEngine,
   onLogout,
 }) => {
-  const [activeTab, setActiveTab] = useState<'USERS' | 'TRADER_LOGINS' | 'AI_CREDITS'>('USERS');
+  const [activeTab, setActiveTab] = useState<'USERS' | 'MT5_PROVISIONING' | 'TRADER_LOGINS' | 'AI_CREDITS'>('USERS');
   const [pendingTopUpCount, setPendingTopUpCount] = useState<number>(0);
+  const [waitingMt5Count, setWaitingMt5Count] = useState<number>(0);
   const [stats, setStats] = useState<AdminStats>({
     totalUsers: 0,
     activeUsers: 0,
@@ -91,6 +95,13 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
       const creditStatsData = await creditStatsRes.json();
       if (creditStatsData.success && creditStatsData.stats) {
         setPendingTopUpCount(creditStatsData.stats.pendingTopUpCount || 0);
+      }
+
+      // Fetch MT5 Provisioning Stats for Waiting Badge
+      const mt5Res = await fetch('/api/admin/mt5/accounts', { headers });
+      const mt5Data = await mt5Res.json();
+      if (mt5Data.success && mt5Data.stats) {
+        setWaitingMt5Count(mt5Data.stats.waitingCount || 0);
       }
     } catch (err) {
       console.error('[Admin Dashboard Fetch Error]', err);
@@ -354,6 +365,29 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
             <span className="px-2 py-0.5 rounded-full text-[10px] bg-gray-800 text-gray-300">
               {users.length}
             </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('MT5_PROVISIONING')}
+            className={`px-5 py-3 text-xs font-black rounded-t-xl transition-all flex items-center gap-2 cursor-pointer ${
+              activeTab === 'MT5_PROVISIONING'
+                ? 'bg-[#111622] text-[#E5B842] border-t-2 border-x border-[#E5B842]'
+                : 'text-gray-400 hover:text-white bg-gray-900/50 border border-transparent'
+            }`}
+          >
+            <Terminal className="w-4 h-4 text-[#E5B842]" />
+            <span>MT5 PROVISIONING</span>
+            {waitingMt5Count > 0 ? (
+              <span className="px-2 py-0.5 rounded-full text-[10px] bg-blue-500/20 text-blue-400 border border-blue-500/40 font-black animate-pulse flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-blue-400" />
+                {waitingMt5Count} Waiting
+              </span>
+            ) : (
+              <span className="px-2 py-0.5 rounded-full text-[10px] bg-gray-800 text-gray-400">
+                Queue
+              </span>
+            )}
           </button>
 
           <button
@@ -725,6 +759,13 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                 </tbody>
               </table>
             </div>
+          </div>
+        )}
+
+        {/* 4. TAB 2: MT5 ACCOUNT PROVISIONING */}
+        {activeTab === 'MT5_PROVISIONING' && (
+          <div className="rounded-b-2xl rounded-tr-2xl bg-[#111622] border border-gray-800 p-6 shadow-xl">
+            <AdminMt5ProvisioningView authToken={authToken} />
           </div>
         )}
 
