@@ -24,15 +24,16 @@ import {
   Zap,
   Radio,
   Eye,
+  EyeOff,
+  Key,
+  Lock,
+  Unlock,
+  Loader2,
   X,
   PlayCircle,
   PauseCircle,
 } from 'lucide-react';
-import type {
-  AdminTradingAccountRecord,
-  AdminMt5ProvisioningStats,
-  Mt5ProvisioningStatus,
-} from '../types.ts';
+import { AdminTradingAccountRecord, AdminMt5ProvisioningStats, Mt5ProvisioningStatus } from '../types';
 
 interface AdminMt5ProvisioningViewProps {
   authToken: string;
@@ -55,6 +56,11 @@ export const AdminMt5ProvisioningView: React.FC<AdminMt5ProvisioningViewProps> =
   const [selectedAccount, setSelectedAccount] = useState<AdminTradingAccountRecord | null>(null);
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [isUpdatingProcessing, setIsUpdatingProcessing] = useState<string | null>(null);
+
+  // Credential Reveal State
+  const [revealedPasswords, setRevealedPasswords] = useState<Record<string, string>>({});
+  const [loadingReveal, setLoadingReveal] = useState<Record<string, boolean>>({});
+  const [revealError, setRevealError] = useState<Record<string, string | null>>({});
 
   // Fetch MT5 provisioning accounts from backend
   const fetchAccounts = useCallback(async (showLoading = false) => {
@@ -95,6 +101,45 @@ export const AdminMt5ProvisioningView: React.FC<AdminMt5ProvisioningViewProps> =
     setTimeout(() => setCopiedField(null), 2000);
   };
 
+  // Reveal Password Helper
+  const handleRevealPassword = async (accountNumber: string) => {
+    setLoadingReveal((prev) => ({ ...prev, [accountNumber]: true }));
+    setRevealError((prev) => ({ ...prev, [accountNumber]: null }));
+    try {
+      const res = await fetch(`/api/admin/mt5/accounts/${accountNumber}/reveal-credential`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authToken}`,
+        },
+      });
+      const data = await res.json();
+      if (data.success && data.tradingPassword) {
+        setRevealedPasswords((prev) => ({ ...prev, [accountNumber]: data.tradingPassword }));
+      } else {
+        setRevealError((prev) => ({
+          ...prev,
+          [accountNumber]: data.message || 'Kredensial terenkripsi tidak ditemukan.',
+        }));
+      }
+    } catch (err: any) {
+      setRevealError((prev) => ({
+        ...prev,
+        [accountNumber]: err?.message || 'Gagal menghubungi server untuk membuka kredensial.',
+      }));
+    } finally {
+      setLoadingReveal((prev) => ({ ...prev, [accountNumber]: false }));
+    }
+  };
+
+  const handleHidePassword = (accountNumber: string) => {
+    setRevealedPasswords((prev) => {
+      const next = { ...prev };
+      delete next[accountNumber];
+      return next;
+    });
+  };
+
   // Toggle Processing status
   const handleToggleProcessing = async (accountNumber: string, currentStatus: string) => {
     setIsUpdatingProcessing(accountNumber);
@@ -126,7 +171,7 @@ export const AdminMt5ProvisioningView: React.FC<AdminMt5ProvisioningViewProps> =
   const handleDeleteAccount = async (accountNumber: string, broker: string) => {
     if (
       !window.confirm(
-        `PERINGATAN ADMIN: Apakah Anda yakin ingin menghapus akun MT5 ${accountNumber} (${broker})?\n\nTindakan ini akan mencabut pendaftaran akun dari database SPILLA.`
+        `PERINGATAN ADMIN: Apakah Anda yakin ingin menghapus akun MT5 ${accountNumber} (${broker})?\n\nTindakan ini akan mencabut pendaftaran akun dan kredensial terenkripsi dari database SPILLA.`
       )
     ) {
       return;
@@ -219,11 +264,12 @@ export const AdminMt5ProvisioningView: React.FC<AdminMt5ProvisioningViewProps> =
         </div>
 
         {/* Security Assurance Banner */}
-        <div className="mt-4 p-3 bg-emerald-950/20 border border-emerald-500/30 rounded-xl flex items-center gap-2.5 text-xs text-emerald-300">
-          <Shield className="w-4 h-4 text-emerald-400 shrink-0" />
+        <div className="mt-4 p-3 bg-blue-950/20 border border-blue-500/30 rounded-xl flex items-center gap-2.5 text-xs text-blue-300">
+          <Shield className="w-4 h-4 text-blue-400 shrink-0" />
           <span className="text-[11px] leading-relaxed text-gray-300">
-            <strong className="text-emerald-400">Security Architecture:</strong> Password MT5 tidak pernah disimpan di
-            database server SPILLA. Operator memasukkan kata sandi langsung ke terminal MT5 lokal di laptop pusat.
+            <strong className="text-blue-400">Security Architecture (AES-256-GCM):</strong> Kredensial akun MT5 trader
+            dienkripsi menggunakan AES-256-GCM. Operator SPILLA dapat membuka kata sandi secara aman untuk menghubungkan akun
+            ke terminal MT5 pusat di laptop.
           </span>
         </div>
       </div>
@@ -703,7 +749,7 @@ export const AdminMt5ProvisioningView: React.FC<AdminMt5ProvisioningViewProps> =
               </div>
 
               {/* Quick Copy Credentials for Operator */}
-              <div className="space-y-2">
+              <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <span className="text-[11px] font-bold text-gray-300 uppercase flex items-center gap-1.5">
                     <Building2 className="w-3.5 h-3.5 text-[#E5B842]" />
@@ -772,14 +818,81 @@ export const AdminMt5ProvisioningView: React.FC<AdminMt5ProvisioningViewProps> =
                     </button>
                   </div>
                 </div>
-              </div>
 
-              {/* Zero Password Security Notice */}
-              <div className="p-3.5 bg-amber-950/20 border border-amber-500/30 rounded-xl flex items-start gap-2.5 text-xs text-amber-300">
-                <Shield className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                <div className="text-[11px] leading-relaxed font-sans text-gray-300">
-                  <strong className="text-amber-400">Zero Password Stored:</strong> Sesuai standar keamanan, password MT5
-                  tidak pernah diminta/disimpan di website. Masukkan password trading trader secara manual ke terminal MT5 pusat.
+                {/* MT5 Trading Password (AES-256-GCM Secure Decryption Card) */}
+                <div className="p-3.5 bg-[#0B0E14] border border-amber-500/30 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-1.5">
+                      <Key className="w-3.5 h-3.5 text-[#E5B842]" />
+                      <span className="text-[10px] font-bold text-[#E5B842] uppercase tracking-wide">
+                        MT5 TRADING PASSWORD (AES-256-GCM)
+                      </span>
+                    </div>
+                    <div className="mt-1 font-mono text-xs">
+                      {revealedPasswords[selectedAccount.accountNumber] ? (
+                        <span className="text-white font-black bg-[#141822] px-2.5 py-1 rounded border border-gray-700 select-all">
+                          {revealedPasswords[selectedAccount.accountNumber]}
+                        </span>
+                      ) : (
+                        <span className="text-gray-500 tracking-widest">••••••••••••••••</span>
+                      )}
+                    </div>
+                    {revealError[selectedAccount.accountNumber] && (
+                      <p className="text-[10px] text-rose-400 mt-1 font-sans">
+                        {revealError[selectedAccount.accountNumber]}
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    {revealedPasswords[selectedAccount.accountNumber] ? (
+                      <>
+                        <button
+                          onClick={() =>
+                            handleCopy(revealedPasswords[selectedAccount.accountNumber], 'modal-pwd')
+                          }
+                          className="px-3 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 text-[11px] font-bold transition-all flex items-center gap-1.5 cursor-pointer"
+                        >
+                          {copiedField === 'modal-pwd' ? (
+                            <>
+                              <Check className="w-3.5 h-3.5 text-emerald-400" />
+                              <span>Tersalin!</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3.5 h-3.5" />
+                              <span>Salin Password</span>
+                            </>
+                          )}
+                        </button>
+                        <button
+                          onClick={() => handleHidePassword(selectedAccount.accountNumber)}
+                          className="p-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-400 hover:text-white transition-colors"
+                          title="Sembunyikan Password"
+                        >
+                          <EyeOff className="w-3.5 h-3.5" />
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        onClick={() => handleRevealPassword(selectedAccount.accountNumber)}
+                        disabled={loadingReveal[selectedAccount.accountNumber]}
+                        className="px-3.5 py-2 rounded-xl bg-[#E5B842] hover:bg-[#d4a737] active:scale-[0.99] text-black font-extrabold text-[11px] uppercase tracking-wider transition-all flex items-center gap-2 cursor-pointer shadow-md shadow-[#E5B842]/20 disabled:opacity-50"
+                      >
+                        {loadingReveal[selectedAccount.accountNumber] ? (
+                          <>
+                            <Loader2 className="w-3.5 h-3.5 animate-spin text-black" />
+                            <span>DECRYPTING...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Unlock className="w-3.5 h-3.5 text-black" />
+                            <span>REVEAL TRADING PASSWORD</span>
+                          </>
+                        )}
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -791,14 +904,15 @@ export const AdminMt5ProvisioningView: React.FC<AdminMt5ProvisioningViewProps> =
                 </h4>
                 <ol className="space-y-2 text-xs text-gray-300 list-decimal list-inside leading-relaxed">
                   <li>
-                    Buka instance <strong className="text-white">MetaTrader 5</strong> kosong di laptop pusat SPILLA.
+                    Buka instance <strong className="text-white">MetaTrader 5</strong> di laptop pusat SPILLA.
                   </li>
                   <li>
                     Pilih menu <strong className="text-white">File → Login to Trade Account</strong>.
                   </li>
                   <li>
                     Masukkan <strong className="text-amber-400">Login: {selectedAccount.accountNumber}</strong>,{' '}
-                    <strong className="text-cyan-400">Server: {selectedAccount.brokerServer}</strong>, dan Password trading trader.
+                    <strong className="text-[#E5B842]">Password: [Klik tombol REVEAL di atas]</strong>, dan{' '}
+                    <strong className="text-cyan-400">Server: {selectedAccount.brokerServer}</strong>.
                   </li>
                   <li>
                     Buka chart <strong className="text-white">{selectedAccount.symbol || 'XAUUSD'}</strong> (M15 / H1).

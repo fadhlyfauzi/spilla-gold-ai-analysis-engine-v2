@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import { prisma } from '../db/prisma.js';
 import { db } from '../db/database.js';
 import { isWorkerOnline } from './mt5WorkerRoutes.js';
+import { decryptMt5Password } from '../services/mt5CredentialService.js';
 
 export const adminRouter = Router();
 
@@ -359,6 +360,63 @@ adminRouter.patch('/mt5/accounts/:accountNumber/processing', requireAdmin, async
 });
 
 /**
+ * POST /api/admin/mt5/accounts/:accountNumber/reveal-credential
+ * Admin-only action: Decrypts and securely reveals trading password for manual MT5 login on the central laptop.
+ * NEVER logs password, NEVER returns in query string or standard listings.
+ */
+adminRouter.post('/mt5/accounts/:accountNumber/reveal-credential', requireAdmin, async (req, res) => {
+  try {
+    const accountNumber = String(req.params.accountNumber || '').trim();
+    if (!accountNumber) {
+      return res.status(400).json({ success: false, message: 'Nomor akun MT5 wajib diisi.' });
+    }
+
+    const account = await prisma.tradingAccount.findUnique({
+      where: { accountNumber },
+    });
+
+    if (!account) {
+      return res.status(404).json({ success: false, message: 'Akun trading MT5 tidak ditemukan.' });
+    }
+
+    const credential = await prisma.tradingAccountCredential.findUnique({
+      where: { tradingAccountId: account.id },
+    });
+
+    if (!credential) {
+      return res.status(404).json({
+        success: false,
+        code: 'CREDENTIAL_NOT_FOUND',
+        message: 'Kredensial terenkripsi tidak ditemukan untuk akun ini (mungkin akun demo atau akun terdahulu).',
+      });
+    }
+
+    let tradingPassword = '';
+    try {
+      tradingPassword = decryptMt5Password(credential.encryptedPassword, credential.iv, credential.authTag);
+    } catch (decErr: any) {
+      console.error('[Admin Reveal Credential Decryption Error]:', decErr?.message);
+      return res.status(500).json({
+        success: false,
+        code: 'DECRYPTION_ERROR',
+        message: 'Gagal mendekripsi kata sandi MT5. Pastikan kunci enkripsi MT5_CREDENTIAL_ENCRYPTION_KEY sesuai.',
+      });
+    }
+
+    return res.json({
+      success: true,
+      accountNumber: account.accountNumber,
+      broker: account.broker,
+      brokerServer: account.brokerServer,
+      tradingPassword,
+    });
+  } catch (error: any) {
+    console.error('[Admin Reveal MT5 Credential Error]', error);
+    return res.status(500).json({ success: false, message: 'Gagal membuka kredensial akun MT5.' });
+  }
+});
+
+/**
  * DELETE /api/admin/mt5/accounts/:accountNumber
  * Admin action: Remove / disconnect a trading account from the system
  */
@@ -376,6 +434,10 @@ adminRouter.delete('/mt5/accounts/:accountNumber', requireAdmin, async (req, res
     if (!account) {
       return res.status(404).json({ success: false, message: 'Akun trading MT5 tidak ditemukan.' });
     }
+
+    await prisma.tradingAccountCredential.deleteMany({
+      where: { tradingAccountId: account.id },
+    });
 
     await prisma.tradingAccount.delete({
       where: { accountNumber },

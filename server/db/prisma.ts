@@ -37,6 +37,16 @@ export interface TradingAccountRecord {
   updatedAt: Date;
 }
 
+export interface TradingAccountCredentialRecord {
+  id: string;
+  tradingAccountId: string;
+  encryptedPassword: string;
+  iv: string;
+  authTag: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 // Memory fallback store for TradingAccount if Postgres is unavailable
 class MemoryTradingAccountStore {
   private accounts: TradingAccountRecord[] = [];
@@ -224,6 +234,62 @@ class MemoryTradingAccountStore {
   }
 }
 
+// Memory fallback store for TradingAccountCredential if Postgres is unavailable
+class MemoryTradingAccountCredentialStore {
+  private credentials: TradingAccountCredentialRecord[] = [];
+
+  async findUnique(args: { where: { tradingAccountId?: string; id?: string } }): Promise<TradingAccountCredentialRecord | null> {
+    const { tradingAccountId, id } = args.where;
+    if (tradingAccountId) {
+      return this.credentials.find((c) => c.tradingAccountId === tradingAccountId) || null;
+    }
+    if (id) {
+      return this.credentials.find((c) => c.id === id) || null;
+    }
+    return null;
+  }
+
+  async create(args: { data: any }): Promise<TradingAccountCredentialRecord> {
+    const now = new Date();
+    const existingIdx = this.credentials.findIndex((c) => c.tradingAccountId === args.data.tradingAccountId);
+    if (existingIdx !== -1) {
+      this.credentials.splice(existingIdx, 1);
+    }
+    const newCred: TradingAccountCredentialRecord = {
+      id: `cred-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      tradingAccountId: args.data.tradingAccountId,
+      encryptedPassword: args.data.encryptedPassword,
+      iv: args.data.iv,
+      authTag: args.data.authTag,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.credentials.push(newCred);
+    return newCred;
+  }
+
+  async delete(args: { where: { tradingAccountId?: string; id?: string } }): Promise<TradingAccountCredentialRecord | null> {
+    const idx = this.credentials.findIndex((c) => {
+      if (args.where.tradingAccountId && c.tradingAccountId === args.where.tradingAccountId) return true;
+      if (args.where.id && c.id === args.where.id) return true;
+      return false;
+    });
+    if (idx === -1) return null;
+    return this.credentials.splice(idx, 1)[0];
+  }
+
+  async deleteMany(args?: { where?: { tradingAccountId?: string } }): Promise<{ count: number }> {
+    if (!args?.where?.tradingAccountId) {
+      const count = this.credentials.length;
+      this.credentials = [];
+      return { count };
+    }
+    const before = this.credentials.length;
+    this.credentials = this.credentials.filter((c) => c.tradingAccountId !== args.where?.tradingAccountId);
+    return { count: before - this.credentials.length };
+  }
+}
+
 // Memory fallback store if Postgres is unavailable
 class MemoryUserStore {
   private users: UserRecord[] = [];
@@ -333,6 +399,7 @@ class MemoryUserStore {
 
 const memoryStore = new MemoryUserStore();
 const memoryAccountStore = new MemoryTradingAccountStore();
+const memoryCredentialStore = new MemoryTradingAccountCredentialStore();
 
 let realPrisma: PrismaClient | null = null;
 let useRealPrisma = false;
@@ -430,6 +497,32 @@ export const prisma: any = {
         try { return await (realPrisma as any).tradingAccount.delete(args); } catch (err) { useRealPrisma = false; }
       }
       return memoryAccountStore.delete(args);
+    },
+  },
+  tradingAccountCredential: {
+    findUnique: async (args: any) => {
+      if (useRealPrisma && realPrisma) {
+        try { return await (realPrisma as any).tradingAccountCredential.findUnique(args); } catch (err) { useRealPrisma = false; }
+      }
+      return memoryCredentialStore.findUnique(args);
+    },
+    create: async (args: any) => {
+      if (useRealPrisma && realPrisma) {
+        try { return await (realPrisma as any).tradingAccountCredential.create(args); } catch (err) { useRealPrisma = false; }
+      }
+      return memoryCredentialStore.create(args);
+    },
+    delete: async (args: any) => {
+      if (useRealPrisma && realPrisma) {
+        try { return await (realPrisma as any).tradingAccountCredential.delete(args); } catch (err) { useRealPrisma = false; }
+      }
+      return memoryCredentialStore.delete(args);
+    },
+    deleteMany: async (args: any) => {
+      if (useRealPrisma && realPrisma) {
+        try { return await (realPrisma as any).tradingAccountCredential.deleteMany(args); } catch (err) { useRealPrisma = false; }
+      }
+      return memoryCredentialStore.deleteMany(args);
     },
   },
 };

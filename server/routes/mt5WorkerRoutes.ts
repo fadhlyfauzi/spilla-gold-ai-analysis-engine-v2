@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import jwt from 'jsonwebtoken';
 import { getPrismaClient } from '../db/prisma.js';
+import { encryptMt5Password } from '../services/mt5CredentialService.js';
 
 export const mt5WorkerRouter = Router();
 const prisma = getPrismaClient();
@@ -67,15 +68,26 @@ export function isWorkerOnline(lastHeartbeat: Date | string | number | null | un
 /**
  * POST /api/mt5/accounts
  * Phase 2: Connect / Register Trading Account
- * Authenticated user registers their MT5 account metadata (broker, accountNumber, server).
+ * Authenticated user registers their MT5 account metadata (broker, accountNumber, server, tradingPassword).
+ * Ownership is strictly assigned to req.currentUser.id.
+ * Trading password is encrypted via AES-256-GCM and stored in TradingAccountCredential.
  * Safe defaults applied: executionEnabled = false, workerOnline = false, balance = 0, etc.
- * The website NEVER asks for or stores MT5 passwords.
  */
 mt5WorkerRouter.post('/accounts', requireAuth, async (req: any, res: any) => {
   try {
-    const { broker, accountNumber, brokerServer } = req.body || {};
+    const { broker, brokerName, accountNumber, brokerServer, tradingPassword } = req.body || {};
 
-    // 1. Validate Account Number
+    // 1. Authenticated User Check (Strict ownership)
+    const userId = req.currentUser?.id;
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        code: 'UNAUTHORIZED',
+        message: 'Otentikasi pengguna gagal. Silakan login kembali.',
+      });
+    }
+
+    // 2. Validate Account Number
     if (!accountNumber || (typeof accountNumber !== 'string' && typeof accountNumber !== 'number')) {
       return res.status(400).json({
         success: false,
@@ -93,10 +105,24 @@ mt5WorkerRouter.post('/accounts', requireAuth, async (req: any, res: any) => {
       });
     }
 
-    const trimmedBroker = broker && typeof broker === 'string' && broker.trim() ? broker.trim() : 'AIMS';
+    // 3. Validate Trading Password
+    if (!tradingPassword || typeof tradingPassword !== 'string' || !tradingPassword.trim()) {
+      return res.status(400).json({
+        success: false,
+        code: 'PASSWORD_REQUIRED',
+        message: 'MT5 Trading/Master Password wajib diisi untuk menghubungkan akun ke terminal pusat.',
+      });
+    }
+    const trimmedTradingPassword = tradingPassword.trim();
+
+    // 4. Validate Broker & Broker Server
+    let trimmedBroker = broker && typeof broker === 'string' && broker.trim() ? broker.trim() : 'AIMS';
+    if (trimmedBroker === 'OTHER') {
+      trimmedBroker = brokerName && typeof brokerName === 'string' && brokerName.trim() ? brokerName.trim() : 'OTHER';
+    }
     const trimmedBrokerServer = brokerServer && typeof brokerServer === 'string' && brokerServer.trim() ? brokerServer.trim() : 'AIMS-Live';
 
-    // 2. Duplicate Account Protection
+    // 5. Duplicate Account Protection
     const existingAccount = await prisma.tradingAccount.findUnique({
       where: { accountNumber: trimmedAccountNumber },
     });
@@ -105,15 +131,24 @@ mt5WorkerRouter.post('/accounts', requireAuth, async (req: any, res: any) => {
       return res.status(409).json({
         success: false,
         code: 'ACCOUNT_ALREADY_REGISTERED',
-        message: 'Trading account is already registered',
+        message: 'Nomor akun MT5 ini sudah terdaftar di sistem. Silakan gunakan nomor akun lain atau hubungi admin.',
       });
     }
 
-    // 3. User Ownership: Use authenticated user's ID
-    const userId = req.currentUser?.id || 'usr-trader-002';
+    // 6. Encrypt Trading Password using AES-256-GCM
+    let encryptedCreds;
+    try {
+      encryptedCreds = encryptMt5Password(trimmedTradingPassword);
+    } catch (encErr: any) {
+      console.error('[MT5 Credential Encryption Error]:', encErr?.message);
+      return res.status(500).json({
+        success: false,
+        code: 'ENCRYPTION_CONFIG_ERROR',
+        message: 'Gagal mengenkripsi kata sandi MT5: Konfigurasi enkripsi server belum siap. Hubungi administrator.',
+      });
+    }
 
-    // 4. Create TradingAccount with Safe Defaults
-    // User-controlled input CANNOT set workerId, workerOnline, lastHeartbeat, or executionEnabled
+    // 7. Create TradingAccount with Safe Defaults (Strict Real User Ownership)
     const newAccount = await prisma.tradingAccount.create({
       data: {
         userId,
@@ -135,14 +170,25 @@ mt5WorkerRouter.post('/accounts', requireAuth, async (req: any, res: any) => {
       },
     });
 
+    // 8. Store Encrypted Credential in separate TradingAccountCredential model
+    await prisma.tradingAccountCredential.create({
+      data: {
+        tradingAccountId: newAccount.id,
+        encryptedPassword: encryptedCreds.encryptedPassword,
+        iv: encryptedCreds.iv,
+        authTag: encryptedCreds.authTag,
+      },
+    });
+
     console.log(
-      `[MT5 ACCOUNT CONNECTED] User=${userId} Account=${trimmedAccountNumber} Broker=${trimmedBroker} Server=${trimmedBrokerServer}`
+      `[MT5 ACCOUNT CONNECTED] User=${userId} Account=${trimmedAccountNumber} Broker=${trimmedBroker} Server=${trimmedBrokerServer} (Encrypted Credential Stored)`
     );
 
+    // 9. Return clean response with NO plaintext or encrypted password exposed
     return res.status(201).json({
       success: true,
       code: 'ACCOUNT_REGISTERED',
-      message: 'Trading account registered successfully. Awaiting MT5 EA heartbeat.',
+      message: 'Trading account registered successfully. Awaiting MT5 terminal provisioning & heartbeat.',
       account: {
         id: newAccount.id,
         accountNumber: newAccount.accountNumber,
@@ -234,6 +280,10 @@ mt5WorkerRouter.delete('/accounts/:accountNumber', requireAuth, async (req: any,
         message: 'You are not authorized to disconnect this account',
       });
     }
+
+    await prisma.tradingAccountCredential.deleteMany({
+      where: { tradingAccountId: account.id },
+    });
 
     await prisma.tradingAccount.delete({
       where: { accountNumber },

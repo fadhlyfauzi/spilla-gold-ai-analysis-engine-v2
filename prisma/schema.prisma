@@ -73,7 +73,19 @@ model TradingAccount {
   isLive           Boolean             @default(false)
   createdAt        DateTime            @default(now())
   updatedAt        DateTime            @updatedAt
+  credential       TradingAccountCredential?
   tradePlans       TradePlanSnapshot[]
+}
+
+model TradingAccountCredential {
+  id                String         @id @default(uuid())
+  tradingAccountId  String         @unique
+  tradingAccount    TradingAccount @relation(fields: [tradingAccountId], references: [id], onDelete: Cascade)
+  encryptedPassword String
+  iv                String
+  authTag           String
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
 }
 
 model TradePlanSnapshot {
