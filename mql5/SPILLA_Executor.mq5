@@ -5,8 +5,8 @@
 //+------------------------------------------------------------------+
 #property copyright   "Copyright 2026, SPILLA GOLD Institutional Engine"
 #property link        "https://ai.studio"
-#property version     "2.00"
-#property description "SPILLA GOLD Automated Trade Execution Worker for MetaTrader 5 (DEMO ONLY)"
+#property version     "2.30"
+#property description "SPILLA GOLD Automated Multi-Market Trade Execution Worker for MetaTrader 5 (DEMO ONLY)"
 #property strict
 
 //+------------------------------------------------------------------+
@@ -28,9 +28,10 @@ input int      InpPollIntervalSec       = 3;                                    
 input group "=== [2] EXECUTION SAFEGUARDS (DEMO ONLY) ==="
 input bool     InpEnableExecution       = false;                                                                    // Master Execution Switch (false = Dry-Run only)
 input long     InpExpectedAccountLogin  = 0;                                                                        // Expected Account Login (0 = Ignore check)
-input string   InpAllowedSymbol         = "XAUUSD";                                                                 // Allowed Trading Symbol
+input string   InpWebSymbol             = "XAUUSD";                                                                 // Canonical Web Symbol (e.g. XAUUSD, BTCUSD, EURUSD, GBPUSD, USDJPY, XAUUSD.CENT)
+input string   InpBrokerSymbol          = "XAUUSD";                                                                 // Broker MT5 Symbol (e.g. XAUUSD, BTCUSD.edge, XAUUSD.c, etc.)
 input double   InpMaxLot                = 1.00;                                                                     // Maximum Allowed Lot Size
-input int      InpMaxSpreadPoints       = 300;                                                                      // Max Spread Allowed (Points, e.g. 300 = $3.00)
+input int      InpMaxSpreadPoints       = 300;                                                                      // Max Spread Allowed (Points, e.g. XAU: 300, BTC: 5000, EUR: 25)
 input ulong    InpMagicNumber           = 888999;                                                                   // EA Magic Number
 input ulong    InpDeviationPoints       = 50;                                                                       // Max Allowed Slippage (Points)
 
@@ -65,7 +66,26 @@ CAccountInfo   g_accountInfo;
 
 bool           g_isNetworkBusy          = false;
 datetime       g_lastPollTime           = 0;
+datetime       g_lastHeartbeatTime      = 0;
 string         g_executedSignals[];     // Local in-memory duplicate cache
+
+// Forward declarations
+void SendHeartbeat();
+bool ClaimNextOrder(SPILLA_Order &order);
+void ProcessClaimedOrder(const SPILLA_Order &order);
+bool NotifyProcessingState(const string signalId);
+bool SendExecutionResult(const string signalId, const string status, const string ticket, const double fillPrice, const double executedLot, const string errorCode = "", const string errorMessage = "");
+void LogAndReject(const SPILLA_Order &order, const string errorCode, const string errorMessage);
+bool IsSignalAlreadyExecuted(const string signalId);
+void RegisterExecutedSignal(const string signalId);
+bool HttpSend(const string endpoint, const string method, const string body, string &response, int &httpStatus);
+
+// JSON helpers
+string JsonGetString(const string json, const string key, string defaultValue = "");
+double JsonGetDouble(const string json, const string key, double defaultValue = 0.0);
+bool JsonGetBool(const string json, const string key, bool defaultValue = false);
+string JsonExtractSubObject(const string json, const string key);
+string JsonEscape(const string sourceText);
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -73,9 +93,12 @@ string         g_executedSignals[];     // Local in-memory duplicate cache
 int OnInit()
 {
    Print("====================================================================");
-   Print("[SPILLA EXECUTOR] Initializing SPILLA GOLD MT5 Execution Bridge v2.00");
+   Print("[SPILLA EXECUTOR] Initializing SPILLA GOLD MT5 Execution Bridge v2.30");
    Print("[SPILLA EXECUTOR] Worker ID: ", InpWorkerId);
    Print("[SPILLA EXECUTOR] Target API: ", InpApiBaseUrl);
+   Print("[SPILLA EXECUTOR] Web Canonical Symbol: ", InpWebSymbol);
+   Print("[SPILLA EXECUTOR] Broker Trading Symbol: ", InpBrokerSymbol);
+   Print("[SPILLA EXECUTOR] Max Configured Spread: ", InpMaxSpreadPoints, " points");
    Print("[SPILLA EXECUTOR] Execution Enabled: ", (InpEnableExecution ? "YES (LIVE MT5 ORDERS)" : "NO (DRY-RUN SAFEGUARD MODE)"));
 
    // 1. Check Account Mode (DEMO ONLY RESTRICTION)
@@ -97,23 +120,27 @@ int OnInit()
       return(INIT_PARAMETERS_INCORRECT);
    }
 
-   // 3. Symbol Verification
-   if(!g_symbolInfo.Name(InpAllowedSymbol))
+   // 3. Broker Symbol Verification
+   if(!g_symbolInfo.Name(InpBrokerSymbol))
    {
-      Print("[CONFIG WARNING] Symbol ", InpAllowedSymbol, " could not be loaded into CSymbolInfo. Checking Market Watch...");
+      Print("[CONFIG WARNING] Broker Symbol ", InpBrokerSymbol, " could not be loaded into CSymbolInfo. Checking Market Watch...");
    }
-   if(!SymbolSelect(InpAllowedSymbol, true))
+   if(!SymbolSelect(InpBrokerSymbol, true))
    {
-      Print("[CONFIG ERROR] Symbol ", InpAllowedSymbol, " cannot be selected in Market Watch.");
+      Print("[CONFIG ERROR] Broker Symbol ", InpBrokerSymbol, " cannot be selected in Market Watch.");
       return(INIT_PARAMETERS_INCORRECT);
    }
 
    // 4. Configure CTrade
    g_trade.SetExpertMagicNumber(InpMagicNumber);
    g_trade.SetDeviationInPoints(InpDeviationPoints);
-   g_trade.SetTypeFillingBySymbol(InpAllowedSymbol);
+   g_trade.SetTypeFillingBySymbol(InpBrokerSymbol);
 
-   // 5. Initialize Timer
+   // 5. Send Initial Heartbeat
+   SendHeartbeat();
+   g_lastHeartbeatTime = TimeCurrent();
+
+   // 6. Initialize Timer
    int pollSeconds = (InpPollIntervalSec < 1) ? 1 : InpPollIntervalSec;
    if(!EventSetTimer(pollSeconds))
    {
@@ -138,7 +165,7 @@ void OnDeinit(const int reason)
 }
 
 //+------------------------------------------------------------------+
-//| Expert timer function (Queue Polling)                            |
+//| Expert timer function (Queue Polling & Heartbeat)                |
 //+------------------------------------------------------------------+
 void OnTimer()
 {
@@ -150,6 +177,14 @@ void OnTimer()
 
    g_isNetworkBusy = true;
 
+   // Send periodic heartbeat every ~12 seconds
+   datetime now = TimeCurrent();
+   if(now - g_lastHeartbeatTime >= 12)
+   {
+      SendHeartbeat();
+      g_lastHeartbeatTime = now;
+   }
+
    // 1. Attempt to claim next order from backend queue
    SPILLA_Order order;
    bool hasOrder = ClaimNextOrder(order);
@@ -157,7 +192,7 @@ void OnTimer()
    if(hasOrder)
    {
       Print("--------------------------------------------------------------------");
-      Print("[SPILLA EXECUTOR] CLAIMED ORDER DETECTED: SignalId=", order.signalId, " Side=", order.side, " Lot=", DoubleToString(order.lot, 2));
+      Print("[SPILLA EXECUTOR] CLAIMED ORDER DETECTED: SignalId=", order.signalId, " WebSymbol=", order.symbol, " Side=", order.side, " Lot=", DoubleToString(order.lot, 2));
 
       // 2. Process and execute claimed order
       ProcessClaimedOrder(order);
@@ -166,6 +201,31 @@ void OnTimer()
 
    g_isNetworkBusy = false;
    g_lastPollTime = TimeCurrent();
+}
+
+//+------------------------------------------------------------------+
+//| Send Heartbeat to SPILLA Server                                  |
+//+------------------------------------------------------------------+
+void SendHeartbeat()
+{
+   long login = AccountInfoInteger(ACCOUNT_LOGIN);
+   if(login <= 0) return;
+
+   string body = "{"
+      + "\"workerId\":\"" + InpWorkerId + "\","
+      + "\"accountNumber\":\"" + IntegerToString(login) + "\","
+      + "\"brokerServer\":\"" + AccountInfoString(ACCOUNT_SERVER) + "\","
+      + "\"symbol\":\"" + InpBrokerSymbol + "\","
+      + "\"balance\":" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + ","
+      + "\"equity\":" + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) + ","
+      + "\"freeMargin\":" + DoubleToString(AccountInfoDouble(ACCOUNT_MARGIN_FREE), 2) + ","
+      + "\"leverage\":" + IntegerToString(AccountInfoInteger(ACCOUNT_LEVERAGE)) + ","
+      + "\"isLive\":" + (AccountInfoInteger(ACCOUNT_TRADE_MODE) == ACCOUNT_TRADE_MODE_REAL ? "true" : "false")
+      + "}";
+
+   string response = "";
+   int httpStatus = 0;
+   HttpSend("/api/mt5/heartbeat", "POST", body, response, httpStatus);
 }
 
 //+------------------------------------------------------------------+
@@ -331,7 +391,23 @@ bool SendExecutionResult(const string signalId, const string status, const strin
 }
 
 //+------------------------------------------------------------------+
-//| 5. Core Processing & Safety Validation Routine                   |
+//| Standardized Validation Failure Logger & Rejector                |
+//+------------------------------------------------------------------+
+void LogAndReject(const SPILLA_Order &order, const string errorCode, const string errorMessage)
+{
+   Print("--------------------------------------------------------------------");
+   Print("[VALIDATION FAILED]");
+   Print("SignalId=", order.signalId);
+   Print("WebSymbol=", InpWebSymbol);
+   Print("BrokerSymbol=", InpBrokerSymbol);
+   Print("ErrorCode=", errorCode);
+   Print("ErrorMessage=", errorMessage);
+   Print("--------------------------------------------------------------------");
+   SendExecutionResult(order.signalId, "REJECTED", "", 0, 0, errorCode, errorMessage);
+}
+
+//+------------------------------------------------------------------+
+//| 5. Core Processing & Multi-Market Safety Validation Routine      |
 //+------------------------------------------------------------------+
 void ProcessClaimedOrder(const SPILLA_Order &order)
 {
@@ -343,26 +419,27 @@ void ProcessClaimedOrder(const SPILLA_Order &order)
    if(InpExpectedAccountLogin > 0 && currentAccount != InpExpectedAccountLogin)
    {
       string err = "ACCOUNT_MISMATCH: Connected MT5 account #" + IntegerToString(currentAccount) + " does not match expected #" + IntegerToString(InpExpectedAccountLogin);
-      Print("[VALIDATION FAILED] ", err);
-      SendExecutionResult(order.signalId, "REJECTED", "", 0, 0, "ACCOUNT_MISMATCH", err);
+      LogAndReject(order, "ACCOUNT_MISMATCH", err);
       return;
    }
 
    // Step C: Symbol Validation
-   string tradeSymbol = (order.symbol == "") ? InpAllowedSymbol : order.symbol;
-   if(tradeSymbol != InpAllowedSymbol)
+   // Canonical Web Symbol comparison: Check order.symbol against InpWebSymbol
+   string incomingWebSymbol = (order.symbol == "") ? InpWebSymbol : order.symbol;
+   if(incomingWebSymbol != InpWebSymbol)
    {
-      string err = "INVALID_SYMBOL: Order symbol '" + tradeSymbol + "' differs from allowed symbol '" + InpAllowedSymbol + "'";
-      Print("[VALIDATION FAILED] ", err);
-      SendExecutionResult(order.signalId, "REJECTED", "", 0, 0, "INVALID_SYMBOL", err);
+      string err = "INVALID_SYMBOL: Order Web Symbol '" + incomingWebSymbol + "' does not match configured InpWebSymbol '" + InpWebSymbol + "'";
+      LogAndReject(order, "INVALID_SYMBOL", err);
       return;
    }
 
+   // After canonical validation succeeds, map to InpBrokerSymbol
+   string tradeSymbol = InpBrokerSymbol;
+
    if(!SymbolSelect(tradeSymbol, true))
    {
-      string err = "SYMBOL_UNAVAILABLE: Broker cannot select symbol " + tradeSymbol;
-      Print("[VALIDATION FAILED] ", err);
-      SendExecutionResult(order.signalId, "REJECTED", "", 0, 0, "SYMBOL_UNAVAILABLE", err);
+      string err = "SYMBOL_UNAVAILABLE: Broker cannot select symbol '" + tradeSymbol + "' in MT5 Market Watch";
+      LogAndReject(order, "SYMBOL_UNAVAILABLE", err);
       return;
    }
 
@@ -370,18 +447,16 @@ void ProcessClaimedOrder(const SPILLA_Order &order)
    if(IsSignalAlreadyExecuted(order.signalId))
    {
       string err = "DUPLICATE_SIGNAL: SignalId " + order.signalId + " was already executed or exists in trade history.";
-      Print("[VALIDATION FAILED] ", err);
-      SendExecutionResult(order.signalId, "REJECTED", "", 0, 0, "DUPLICATE_EXECUTION", err);
+      LogAndReject(order, "DUPLICATE_EXECUTION", err);
       return;
    }
 
-   // Step E: Market Quotes & Spread Validation
+   // Step E: Market Quotes & Symbol-Specific Spread Validation
    MqlTick tick;
    if(!SymbolInfoTick(tradeSymbol, tick))
    {
-      string err = "NO_MARKET_TICK: Failed to fetch live tick data for " + tradeSymbol;
-      Print("[VALIDATION FAILED] ", err);
-      SendExecutionResult(order.signalId, "REJECTED", "", 0, 0, "NO_MARKET_TICK", err);
+      string err = "NO_MARKET_TICK: Failed to fetch live tick data for broker symbol " + tradeSymbol;
+      LogAndReject(order, "NO_MARKET_TICK", err);
       return;
    }
 
@@ -389,11 +464,21 @@ void ProcessClaimedOrder(const SPILLA_Order &order)
    if(point <= 0) point = 0.01;
 
    int currentSpreadPoints = (int)MathRound((tick.ask - tick.bid) / point);
+
+   // Mandated Spread Check Logging
+   Print("[SPREAD CHECK]");
+   Print("WebSymbol=", InpWebSymbol);
+   Print("BrokerSymbol=", tradeSymbol);
+   Print("Bid=", DoubleToString(tick.bid, (int)SymbolInfoInteger(tradeSymbol, SYMBOL_DIGITS)));
+   Print("Ask=", DoubleToString(tick.ask, (int)SymbolInfoInteger(tradeSymbol, SYMBOL_DIGITS)));
+   Print("Point=", DoubleToString(point, 6));
+   Print("SpreadPoints=", IntegerToString(currentSpreadPoints));
+   Print("MaxSpreadPoints=", IntegerToString(InpMaxSpreadPoints));
+
    if(currentSpreadPoints > InpMaxSpreadPoints)
    {
-      string err = "SPREAD_TOO_HIGH: Current spread (" + IntegerToString(currentSpreadPoints) + " pts) exceeds max limit (" + IntegerToString(InpMaxSpreadPoints) + " pts)";
-      Print("[VALIDATION FAILED] ", err);
-      SendExecutionResult(order.signalId, "REJECTED", "", 0, 0, "SPREAD_TOO_HIGH", err);
+      string err = "SPREAD_TOO_HIGH: Current spread (" + IntegerToString(currentSpreadPoints) + " pts) exceeds max limit (" + IntegerToString(InpMaxSpreadPoints) + " pts) on " + tradeSymbol;
+      LogAndReject(order, "SPREAD_TOO_HIGH", err);
       return;
    }
 
@@ -409,9 +494,8 @@ void ProcessClaimedOrder(const SPILLA_Order &order)
    double requestedLot = order.lot;
    if(requestedLot <= 0 || requestedLot > InpMaxLot || requestedLot < minLot || requestedLot > maxLot)
    {
-      string err = "INVALID_VOLUME: Requested lot " + DoubleToString(requestedLot, 2) + " is outside limits (Min: " + DoubleToString(minLot, 2) + ", Max: " + DoubleToString(InpMaxLot, 2) + ")";
-      Print("[VALIDATION FAILED] ", err);
-      SendExecutionResult(order.signalId, "REJECTED", "", 0, 0, "INVALID_VOLUME", err);
+      string err = "INVALID_VOLUME: Requested lot " + DoubleToString(requestedLot, 2) + " is outside limits (Min: " + DoubleToString(minLot, 2) + ", Max: " + DoubleToString(InpMaxLot, 2) + ", BrokerMax: " + DoubleToString(maxLot, 2) + ")";
+      LogAndReject(order, "INVALID_VOLUME", err);
       return;
    }
 
@@ -421,6 +505,8 @@ void ProcessClaimedOrder(const SPILLA_Order &order)
    normalizedLot = NormalizeDouble(normalizedLot, 2);
 
    // Step H: Price, Stop Loss, and Take Profit Distance Validation
+   int specDigits = (int)SymbolInfoInteger(tradeSymbol, SYMBOL_DIGITS);
+   if(specDigits <= 0) specDigits = 2;
    int stopsLevel = (int)SymbolInfoInteger(tradeSymbol, SYMBOL_TRADE_STOPS_LEVEL);
    double stopsDistance = stopsLevel * point;
 
@@ -428,23 +514,20 @@ void ProcessClaimedOrder(const SPILLA_Order &order)
    {
       if(order.stopLoss >= tick.bid || order.stopLoss <= 0)
       {
-         string err = "INVALID_STOPS: For BUY, Stop Loss (" + DoubleToString(order.stopLoss, 2) + ") must be below Bid (" + DoubleToString(tick.bid, 2) + ")";
-         Print("[VALIDATION FAILED] ", err);
-         SendExecutionResult(order.signalId, "REJECTED", "", 0, 0, "INVALID_BUY_SL", err);
+         string err = "INVALID_STOPS: For BUY, Stop Loss (" + DoubleToString(order.stopLoss, specDigits) + ") must be below Bid (" + DoubleToString(tick.bid, specDigits) + ")";
+         LogAndReject(order, "INVALID_BUY_SL", err);
          return;
       }
       if(order.takeProfit1 <= tick.ask)
       {
-         string err = "INVALID_STOPS: For BUY, TP1 (" + DoubleToString(order.takeProfit1, 2) + ") must be above Ask (" + DoubleToString(tick.ask, 2) + ")";
-         Print("[VALIDATION FAILED] ", err);
-         SendExecutionResult(order.signalId, "REJECTED", "", 0, 0, "INVALID_BUY_TP", err);
+         string err = "INVALID_STOPS: For BUY, TP1 (" + DoubleToString(order.takeProfit1, specDigits) + ") must be above Ask (" + DoubleToString(tick.ask, specDigits) + ")";
+         LogAndReject(order, "INVALID_BUY_TP", err);
          return;
       }
       if(stopsDistance > 0 && (tick.bid - order.stopLoss) < stopsDistance)
       {
          string err = "INVALID_STOPS: Stop Loss is within broker minimum stop distance (" + IntegerToString(stopsLevel) + " points)";
-         Print("[VALIDATION FAILED] ", err);
-         SendExecutionResult(order.signalId, "REJECTED", "", 0, 0, "STOPS_TOO_CLOSE", err);
+         LogAndReject(order, "STOPS_TOO_CLOSE", err);
          return;
       }
    }
@@ -452,31 +535,27 @@ void ProcessClaimedOrder(const SPILLA_Order &order)
    {
       if(order.stopLoss <= tick.ask || order.stopLoss <= 0)
       {
-         string err = "INVALID_STOPS: For SELL, Stop Loss (" + DoubleToString(order.stopLoss, 2) + ") must be above Ask (" + DoubleToString(tick.ask, 2) + ")";
-         Print("[VALIDATION FAILED] ", err);
-         SendExecutionResult(order.signalId, "REJECTED", "", 0, 0, "INVALID_SELL_SL", err);
+         string err = "INVALID_STOPS: For SELL, Stop Loss (" + DoubleToString(order.stopLoss, specDigits) + ") must be above Ask (" + DoubleToString(tick.ask, specDigits) + ")";
+         LogAndReject(order, "INVALID_SELL_SL", err);
          return;
       }
       if(order.takeProfit1 >= tick.bid)
       {
-         string err = "INVALID_STOPS: For SELL, TP1 (" + DoubleToString(order.takeProfit1, 2) + ") must be below Bid (" + DoubleToString(tick.bid, 2) + ")";
-         Print("[VALIDATION FAILED] ", err);
-         SendExecutionResult(order.signalId, "REJECTED", "", 0, 0, "INVALID_SELL_TP", err);
+         string err = "INVALID_STOPS: For SELL, TP1 (" + DoubleToString(order.takeProfit1, specDigits) + ") must be below Bid (" + DoubleToString(tick.bid, specDigits) + ")";
+         LogAndReject(order, "INVALID_SELL_TP", err);
          return;
       }
       if(stopsDistance > 0 && (order.stopLoss - tick.ask) < stopsDistance)
       {
          string err = "INVALID_STOPS: Stop Loss is within broker minimum stop distance (" + IntegerToString(stopsLevel) + " points)";
-         Print("[VALIDATION FAILED] ", err);
-         SendExecutionResult(order.signalId, "REJECTED", "", 0, 0, "STOPS_TOO_CLOSE", err);
+         LogAndReject(order, "STOPS_TOO_CLOSE", err);
          return;
       }
    }
    else
    {
       string err = "UNSUPPORTED_SIDE: Order side '" + order.side + "' is not supported.";
-      Print("[VALIDATION FAILED] ", err);
-      SendExecutionResult(order.signalId, "REJECTED", "", 0, 0, "UNSUPPORTED_SIDE", err);
+      LogAndReject(order, "UNSUPPORTED_SIDE", err);
       return;
    }
 
@@ -486,8 +565,8 @@ void ProcessClaimedOrder(const SPILLA_Order &order)
       Print("====================================================================");
       Print("[DRY-RUN MODE] Order validation PASSED successfully!");
       Print("[DRY-RUN MODE] SignalId: ", order.signalId);
-      Print("[DRY-RUN MODE] Side: ", order.side, " | Lot: ", DoubleToString(normalizedLot, 2), " | Symbol: ", tradeSymbol);
-      Print("[DRY-RUN MODE] SL: ", DoubleToString(order.stopLoss, 2), " | TP1: ", DoubleToString(order.takeProfit1, 2));
+      Print("[DRY-RUN MODE] Side: ", order.side, " | Lot: ", DoubleToString(normalizedLot, 2), " | WebSymbol: ", InpWebSymbol, " | BrokerSymbol: ", tradeSymbol);
+      Print("[DRY-RUN MODE] SL: ", DoubleToString(order.stopLoss, specDigits), " | TP1: ", DoubleToString(order.takeProfit1, specDigits));
       Print("[DRY-RUN MODE] ENABLE_EXECUTION=false -> Live order was NOT placed.");
       Print("====================================================================");
       SendExecutionResult(order.signalId, "REJECTED", "", 0, 0, "DRY_RUN_SAFEGUARD", "Validation PASSED. Real order skipped because ENABLE_EXECUTION is set to false.");
@@ -498,7 +577,7 @@ void ProcessClaimedOrder(const SPILLA_Order &order)
    string orderComment = "SPILLA:" + order.signalId;
    bool orderSuccess = false;
 
-   Print("[EXECUTING ORDER] Sending ", order.side, " ", DoubleToString(normalizedLot, 2), " ", tradeSymbol, " SL=", DoubleToString(order.stopLoss, 2), " TP=", DoubleToString(order.takeProfit1, 2), " Comment=", orderComment);
+   Print("[EXECUTING ORDER] Sending ", order.side, " ", DoubleToString(normalizedLot, 2), " ", tradeSymbol, " SL=", DoubleToString(order.stopLoss, specDigits), " TP=", DoubleToString(order.takeProfit1, specDigits), " Comment=", orderComment);
 
    if(order.side == "BUY")
    {
@@ -525,7 +604,7 @@ void ProcessClaimedOrder(const SPILLA_Order &order)
 
       Print("====================================================================");
       Print("[EXECUTION SUCCESS] Order EXECUTED successfully in MT5!");
-      Print("Ticket: #", ticket, " | Fill: $", DoubleToString(fillPrice, 2), " | Lot: ", DoubleToString(executedLot, 2));
+      Print("Ticket: #", ticket, " | Fill: $", DoubleToString(fillPrice, specDigits), " | Lot: ", DoubleToString(executedLot, 2));
       Print("====================================================================");
 
       // Register local duplicate tracking

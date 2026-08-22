@@ -1052,7 +1052,16 @@ export const AdminMt5ProvisioningView: React.FC<AdminMt5ProvisioningViewProps> =
                     Buka chart <strong className="text-white">{selectedAccount.symbol || 'XAUUSD'}</strong> (M15 / H1).
                   </li>
                   <li>
-                    Attach Expert Advisor <strong className="text-[#E5B842]">SPILLA_Executor_v230.mq5</strong>.
+                    Attach Expert Advisor <strong className="text-[#E5B842]">SPILLA_Executor.mq5 (v2.30)</strong>.
+                  </li>
+                  <li>
+                    Konfigurasi Input EA:
+                    <div className="mt-1 ml-2 p-2 bg-[#0B0E14] border border-gray-800 rounded text-[11px] font-mono text-gray-300 space-y-1">
+                      <div>• <span className="text-[#E5B842]">InpWebSymbol</span> = <span className="text-white font-bold">BTCUSD</span> <span className="text-gray-500">(Canonical Web Market)</span></div>
+                      <div>• <span className="text-[#E5B842]">InpBrokerSymbol</span> = <span className="text-emerald-400 font-bold">{selectedAccount.symbol || 'BTCUSD.edge'}</span> <span className="text-gray-500">(MT5 Broker Symbol)</span></div>
+                      <div>• <span className="text-[#E5B842]">InpMaxSpreadPoints</span> = <span className="text-cyan-400 font-bold">5000</span> <span className="text-gray-500">(BTC: 5000, Gold: 300, Forex: 25)</span></div>
+                      <div>• <span className="text-[#E5B842]">InpWorkerId</span> = <span className="text-[#E5B842] font-bold">MT5_{selectedAccount.accountNumber}</span></div>
+                    </div>
                   </li>
                   <li>
                     Pastikan tombol <strong className="text-emerald-400">Algo Trading</strong> di MT5 aktif.
