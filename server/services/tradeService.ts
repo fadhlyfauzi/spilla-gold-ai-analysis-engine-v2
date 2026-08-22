@@ -190,6 +190,9 @@ export class TradeService {
     }
 
     // 7. Numeric Lot / Volume Safety Validation
+    if (payload.lot === undefined || payload.lot === null || isNaN(Number(payload.lot)) || Number(payload.lot) <= 0) {
+      payload.lot = (payload as any).volume;
+    }
     const numericLot = Number(payload.lot);
     if (isNaN(numericLot) || !isFinite(numericLot) || numericLot <= 0) {
       return {
@@ -212,6 +215,20 @@ export class TradeService {
           message: `ORDER DISPATCH REJECTED: Lot size ${numericLot} exceeds hard test safety cap of ${allowedMaxLot} for ${spec.symbol}.`,
         };
       }
+    }
+
+    // 8. Normalize aliases for Price, SL, TP1, TP2
+    if (payload.entryPrice === undefined || payload.entryPrice === null || isNaN(Number(payload.entryPrice)) || Number(payload.entryPrice) <= 0) {
+      payload.entryPrice = (payload as any).entry_price ?? (payload as any).entry ?? (payload as any).capturePrice ?? (payload as any).capture_price;
+    }
+    if (payload.stopLoss === undefined || payload.stopLoss === null || isNaN(Number(payload.stopLoss)) || Number(payload.stopLoss) <= 0) {
+      payload.stopLoss = (payload as any).stop_loss ?? (payload as any).sl;
+    }
+    if (payload.takeProfit1 === undefined || payload.takeProfit1 === null || isNaN(Number(payload.takeProfit1)) || Number(payload.takeProfit1) <= 0) {
+      payload.takeProfit1 = (payload as any).take_profit_1 ?? (payload as any).tp1 ?? (payload as any).takeProfit ?? (payload as any).take_profit ?? (payload as any).take_profit1;
+    }
+    if (payload.takeProfit2 === undefined || payload.takeProfit2 === null || isNaN(Number(payload.takeProfit2)) || Number(payload.takeProfit2) <= 0) {
+      payload.takeProfit2 = (payload as any).take_profit_2 ?? (payload as any).tp2 ?? (payload as any).take_profit2;
     }
 
     // 9. Entry Price Validation
@@ -252,6 +269,11 @@ export class TradeService {
     const symToValidate = (payload.canonicalSymbol || payload.symbol || 'XAUUSD').trim().toUpperCase();
     const resolvedSpec = symbolService.resolveSymbol(symToValidate);
     const canonical = resolvedSpec.canonicalSymbol;
+
+    // Diagnostic Logging in Execution Gate
+    console.log(
+      `[EXECUTION PAYLOAD]\nSymbol=${canonical}\nSide=${side}\nEntry=${numEntry}\nSL=${numSL}\nTP1=${numTP1}\nTP2=${payload.takeProfit2 ? Number(payload.takeProfit2) : '—'}\nLot=${numericLot}`
+    );
 
     // A. Symbol Plausible Price Range Advisory Check (Advisory warning only - does NOT hard-block execution)
     if (canonical === 'BTCUSD') {

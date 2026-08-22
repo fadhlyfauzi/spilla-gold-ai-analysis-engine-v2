@@ -114,7 +114,7 @@ export const createExecutionParametersFromSnapshot = (
   const rawRiskDist = Number(snap.risk_distance);
   const riskDist = (rawRiskDist > 0 && rawRiskDist < entry * 0.3) ? rawRiskDist : defaultRiskDist;
 
-  let rawSl = plan.stop_loss ? Number(plan.stop_loss) : 0;
+  let rawSl = Number(plan.stop_loss ?? plan.stopLoss ?? plan.sl ?? (snap as any).stop_loss ?? (snap as any).stopLoss ?? 0);
   const isSlOffScale = !rawSl || isNaN(rawSl) || rawSl <= 0 || rawSl < entry * 0.6 || rawSl > entry * 1.4;
   const isSlWrongSide = side === 'BUY' ? rawSl >= entry : rawSl <= entry;
   if (isSlOffScale || isSlWrongSide) {
@@ -122,7 +122,7 @@ export const createExecutionParametersFromSnapshot = (
   }
   const sl = Number(Math.max(0.0001, rawSl).toFixed(specDigits));
 
-  let rawTp1 = plan.take_profit_1 ? Number(plan.take_profit_1) : 0;
+  let rawTp1 = Number(plan.take_profit_1 ?? plan.takeProfit1 ?? plan.tp1 ?? plan.take_profit ?? plan.takeProfit ?? (snap as any).take_profit_1 ?? (snap as any).takeProfit1 ?? 0);
   const isTp1OffScale = !rawTp1 || isNaN(rawTp1) || rawTp1 <= 0 || rawTp1 < entry * 0.6 || rawTp1 > entry * 1.4;
   const isTp1WrongSide = side === 'BUY' ? rawTp1 <= entry : rawTp1 >= entry;
   if (isTp1OffScale || isTp1WrongSide) {
@@ -130,7 +130,7 @@ export const createExecutionParametersFromSnapshot = (
   }
   const tp1 = Number(Math.max(0.0001, rawTp1).toFixed(specDigits));
 
-  let rawTp2: number | null = plan.take_profit_2 ? Number(plan.take_profit_2) : null;
+  let rawTp2: number | null = plan.take_profit_2 ? Number(plan.take_profit_2) : (plan.takeProfit2 ? Number(plan.takeProfit2) : null);
   const isTp2OffScale = rawTp2 !== null && (!rawTp2 || isNaN(rawTp2) || rawTp2 <= 0 || rawTp2 < entry * 0.6 || rawTp2 > entry * 1.4);
   const isTp2WrongSide = rawTp2 !== null && (side === 'BUY' ? rawTp2 <= tp1 : rawTp2 >= tp1);
   if (isTp2OffScale || isTp2WrongSide || rawTp2 === null) {
@@ -962,27 +962,43 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
       );
     }
     if (params) {
-      if (params.side !== actionToExecute) {
-        const entry = params.entryPrice;
-        const isTargetSell = actionToExecute === 'SELL';
-        const isCrypto = selectedSymbol.toUpperCase().includes('BTC');
-        const defaultRiskDist = isCrypto ? (tradingStyle === 'SCALPING' ? 450.0 : 650.0) : (currentSymbolSpec.digits === 5 ? 0.0035 : currentSymbolSpec.digits === 3 ? 0.45 : 17.02);
-        const calculatedRisk = Math.abs(params.stopLoss - entry);
-        const riskDistance = (calculatedRisk > 0 && calculatedRisk < entry * 0.3) ? calculatedRisk : defaultRiskDist;
-        const digits = currentSymbolSpec.digits || 2;
-        const newSL = Number((isTargetSell ? entry + riskDistance : entry - riskDistance).toFixed(digits));
-        const newTP1 = Number((isTargetSell ? entry - riskDistance * 1.57 : entry + riskDistance * 1.57).toFixed(digits));
-        const newTP2 = Number((isTargetSell ? entry - riskDistance * 2.8 : entry + riskDistance * 2.8).toFixed(digits));
+      const entry = params.entryPrice > 0 ? params.entryPrice : (currentPrice > 0 ? currentPrice : 4470.00);
+      const isTargetSell = actionToExecute === 'SELL';
+      const isCrypto = selectedSymbol.toUpperCase().includes('BTC');
+      const isForex = currentSymbolSpec.digits === 5 || currentSymbolSpec.digits === 3;
+      const defaultRiskDist = isCrypto ? (tradingStyle === 'SCALPING' ? 450.0 : 650.0) : isForex ? (currentSymbolSpec.digits === 3 ? 0.45 : 0.0035) : 17.02;
+      const calculatedRisk = Math.abs(params.stopLoss - entry);
+      const riskDistance = (calculatedRisk > 0 && calculatedRisk < entry * 0.3) ? calculatedRisk : defaultRiskDist;
+      const digits = currentSymbolSpec.digits || 2;
 
-        params = {
-          ...params,
-          signalId: `SG-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`,
-          side: actionToExecute,
-          stopLoss: newSL,
-          takeProfit1: newTP1,
-          takeProfit2: newTP2,
-        };
+      let validSL = params.stopLoss;
+      let validTP1 = params.takeProfit1;
+      let validTP2 = params.takeProfit2;
+
+      const needsRecalc =
+        params.side !== actionToExecute ||
+        !validSL ||
+        validSL <= 0 ||
+        !validTP1 ||
+        validTP1 <= 0 ||
+        (isTargetSell ? validSL <= entry : validSL >= entry) ||
+        (isTargetSell ? validTP1 >= entry : validTP1 <= entry);
+
+      if (needsRecalc) {
+        validSL = Number((isTargetSell ? entry + riskDistance : entry - riskDistance).toFixed(digits));
+        validTP1 = Number((isTargetSell ? entry - riskDistance * 1.57 : entry + riskDistance * 1.57).toFixed(digits));
+        validTP2 = Number((isTargetSell ? entry - riskDistance * 2.8 : entry + riskDistance * 2.8).toFixed(digits));
       }
+
+      params = {
+        ...params,
+        signalId: params.signalId || `SG-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`,
+        side: actionToExecute,
+        entryPrice: entry,
+        stopLoss: validSL,
+        takeProfit1: validTP1,
+        takeProfit2: validTP2,
+      };
       setExecutionParameters(params);
     }
     setExecutingAction(actionToExecute);
@@ -1034,6 +1050,36 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
 
     try {
       const digits = currentSymbolSpec.digits || 2;
+      const entryVal = Number(currentParams.entryPrice.toFixed(digits));
+      const isSell = currentParams.side === 'SELL';
+      const isCrypto = selectedSymbol.toUpperCase().includes('BTC');
+      const isForex = digits === 5 || digits === 3;
+      const defaultRiskDist = isCrypto ? (tradingStyle === 'SCALPING' ? 450.0 : 650.0) : isForex ? (digits === 3 ? 0.45 : 0.0035) : 17.02;
+      const calculatedRisk = Math.abs(currentParams.stopLoss - entryVal);
+      const riskDist = (calculatedRisk > 0 && calculatedRisk < entryVal * 0.3) ? calculatedRisk : defaultRiskDist;
+
+      let slVal = Number(currentParams.stopLoss?.toFixed(digits));
+      if (!slVal || isNaN(slVal) || slVal <= 0 || (isSell ? slVal <= entryVal : slVal >= entryVal)) {
+        slVal = Number((isSell ? entryVal + riskDist : entryVal - riskDist).toFixed(digits));
+      }
+
+      let tp1Val = Number(currentParams.takeProfit1?.toFixed(digits));
+      if (!tp1Val || isNaN(tp1Val) || tp1Val <= 0 || (isSell ? tp1Val >= entryVal : tp1Val <= entryVal)) {
+        tp1Val = Number((isSell ? entryVal - riskDist * 1.57 : entryVal + riskDist * 1.57).toFixed(digits));
+      }
+
+      let tp2Val = currentParams.takeProfit2 !== null && currentParams.takeProfit2 !== undefined ? Number(currentParams.takeProfit2.toFixed(digits)) : null;
+      if (tp2Val !== null && (!tp2Val || isNaN(tp2Val) || tp2Val <= 0 || (isSell ? tp2Val >= tp1Val : tp2Val <= tp1Val))) {
+        tp2Val = Number((isSell ? entryVal - riskDist * 2.8 : entryVal + riskDist * 2.8).toFixed(digits));
+      }
+
+      const lotVal = Number(currentParams.lot.toFixed(2));
+
+      // Temporary Diagnostic Logging
+      console.log(
+        `[EXECUTION PAYLOAD]\nSymbol=${currentParams.symbol}\nSide=${currentParams.side}\nEntry=${entryVal}\nSL=${slVal}\nTP1=${tp1Val}\nTP2=${tp2Val ?? '—'}\nLot=${lotVal}`
+      );
+
       // Single Source of Truth Payload: passed directly from executionParameters with dynamic tradingAccountId
       const orderPayload: Partial<TradeExecutionOrder> = {
         signalId: currentParams.signalId,
@@ -1043,12 +1089,12 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
         canonicalSymbol: currentParams.canonicalSymbol || currentParams.symbol,
         side: currentParams.side,
         orderType: 'MARKET',
-        lot: Number(currentParams.lot.toFixed(2)),
-        capturePrice: Number(currentParams.entryPrice.toFixed(digits)),
-        entryPrice: Number(currentParams.entryPrice.toFixed(digits)),
-        stopLoss: Number(currentParams.stopLoss.toFixed(digits)),
-        takeProfit1: Number(currentParams.takeProfit1.toFixed(digits)),
-        takeProfit2: currentParams.takeProfit2 !== null ? Number(currentParams.takeProfit2.toFixed(digits)) : null,
+        lot: lotVal,
+        capturePrice: entryVal,
+        entryPrice: entryVal,
+        stopLoss: slVal,
+        takeProfit1: tp1Val,
+        takeProfit2: tp2Val,
         riskPercent: Number(currentParams.riskPercent.toFixed(2)),
         estimatedLoss: Number(currentParams.estimatedLoss.toFixed(2)),
         confidence: Number(currentParams.confidence),

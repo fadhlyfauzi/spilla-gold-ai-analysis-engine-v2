@@ -892,7 +892,7 @@ Return strictly JSON matching this structure:
             plannedZone = parsed.potential_entry_zone || parsed.planned_entry_zone || `${entryZoneMin.toFixed(2)} – ${entryZoneMax.toFixed(2)}`;
           }
 
-          const futureEntryReference = isNoTrade ? 0 : entryMode === 'PULLBACK' ? (entryZoneMin + entryZoneMax) / 2 : currentPrice;
+          const futureEntryReference = entryMode === 'PULLBACK' && entryZoneMin > 0 ? (entryZoneMin + entryZoneMax) / 2 : currentPrice;
 
           // Price Grounding and Validation against capture price regime
           const isPriceGrounded = (pVal: number) => {
@@ -900,61 +900,59 @@ Return strictly JSON matching this structure:
             return pVal >= currentPrice * 0.60 && pVal <= currentPrice * 1.40;
           };
 
-          if (!isNoTrade) {
-            let parsedSl = Number(parsed.stop_loss);
-            let parsedTp1 = Number(parsed.take_profit_1);
-            let parsedTp2 = Number(parsed.take_profit_2);
+          let parsedSl = Number(parsed.stop_loss ?? parsed.stopLoss ?? parsed.sl);
+          let parsedTp1 = Number(parsed.take_profit_1 ?? parsed.takeProfit1 ?? parsed.tp1 ?? parsed.take_profit ?? parsed.takeProfit);
+          let parsedTp2 = Number(parsed.take_profit_2 ?? parsed.takeProfit2 ?? parsed.tp2);
 
-            const isSellDirection = potentialDir === 'SELL' || biasSignal === 'SELL';
-            const defaultRiskDist = isCrypto ? (isScalping ? 450.0 : 850.0) : isForex ? (ctx.spec.digits === 3 ? 0.45 : 0.0035) : (isScalping ? 4.50 : 14.80);
-            const validAtr = (atr > 0 && atr < currentPrice * 0.3) ? atr : defaultRiskDist;
+          const isSellDirection = potentialDir === 'SELL' || biasSignal === 'SELL';
+          const defaultRiskDist = isCrypto ? (isScalping ? 450.0 : 850.0) : isForex ? (ctx.spec.digits === 3 ? 0.45 : 0.0035) : (isScalping ? 4.50 : 14.80);
+          const validAtr = (atr > 0 && atr < currentPrice * 0.3) ? atr : defaultRiskDist;
 
-            if (!isPriceGrounded(parsedSl)) {
-              parsedSl = isSellDirection
-                ? futureEntryReference + (sc.supportResistance?.distToNearestResistance || validAtr * 1.15)
-                : futureEntryReference - (sc.supportResistance?.distToNearestSupport || validAtr * 1.15);
+          if (!isPriceGrounded(parsedSl)) {
+            parsedSl = isSellDirection
+              ? futureEntryReference + (sc.supportResistance?.distToNearestResistance || validAtr * 1.15)
+              : futureEntryReference - (sc.supportResistance?.distToNearestSupport || validAtr * 1.15);
+          }
+          if (!isPriceGrounded(parsedTp1)) {
+            parsedTp1 = isSellDirection
+              ? futureEntryReference - validAtr * 1.8
+              : futureEntryReference + validAtr * 1.8;
+          }
+          if (!isPriceGrounded(parsedTp2)) {
+            parsedTp2 = isSellDirection
+              ? futureEntryReference - validAtr * 3.2
+              : futureEntryReference + validAtr * 3.2;
+          }
+
+          // Directional & Scale Invariants
+          if (!isSellDirection) { // BUY
+            if (parsedSl >= futureEntryReference) parsedSl = futureEntryReference - validAtr * 1.15;
+            if (parsedTp1 <= futureEntryReference) parsedTp1 = futureEntryReference + validAtr * 1.8;
+            if (parsedTp2 <= parsedTp1) parsedTp2 = parsedTp1 + validAtr * 1.4;
+          } else { // SELL
+            if (parsedSl <= futureEntryReference) parsedSl = futureEntryReference + validAtr * 1.15;
+            if (parsedTp1 >= futureEntryReference) parsedTp1 = futureEntryReference - validAtr * 1.8;
+            if (parsedTp2 >= parsedTp1) parsedTp2 = parsedTp1 - validAtr * 1.4;
+          }
+
+          stopLoss = Number(parsedSl.toFixed(ctx.spec.digits));
+          tp1 = Number(parsedTp1.toFixed(ctx.spec.digits));
+          tp2 = Number(parsedTp2.toFixed(ctx.spec.digits));
+
+          const slDistance = Math.abs(futureEntryReference - stopLoss) || validAtr;
+          let tpDistance = Math.abs(tp1 - futureEntryReference);
+          rr = Number((tpDistance / slDistance).toFixed(2));
+
+          if (rr < 1.0) {
+            if (isSellDirection) {
+              tp1 = Number((futureEntryReference - slDistance * 1.2).toFixed(ctx.spec.digits));
+              tp2 = Number((futureEntryReference - slDistance * 2.0).toFixed(ctx.spec.digits));
+            } else {
+              tp1 = Number((futureEntryReference + slDistance * 1.2).toFixed(ctx.spec.digits));
+              tp2 = Number((futureEntryReference + slDistance * 2.0).toFixed(ctx.spec.digits));
             }
-            if (!isPriceGrounded(parsedTp1)) {
-              parsedTp1 = isSellDirection
-                ? futureEntryReference - validAtr * 1.8
-                : futureEntryReference + validAtr * 1.8;
-            }
-            if (!isPriceGrounded(parsedTp2)) {
-              parsedTp2 = isSellDirection
-                ? futureEntryReference - validAtr * 3.2
-                : futureEntryReference + validAtr * 3.2;
-            }
-
-            // Directional & Scale Invariants
-            if (!isSellDirection) { // BUY
-              if (parsedSl >= futureEntryReference) parsedSl = futureEntryReference - validAtr * 1.15;
-              if (parsedTp1 <= futureEntryReference) parsedTp1 = futureEntryReference + validAtr * 1.8;
-              if (parsedTp2 <= parsedTp1) parsedTp2 = parsedTp1 + validAtr * 1.4;
-            } else { // SELL
-              if (parsedSl <= futureEntryReference) parsedSl = futureEntryReference + validAtr * 1.15;
-              if (parsedTp1 >= futureEntryReference) parsedTp1 = futureEntryReference - validAtr * 1.8;
-              if (parsedTp2 >= parsedTp1) parsedTp2 = parsedTp1 - validAtr * 1.4;
-            }
-
-            stopLoss = Number(parsedSl.toFixed(ctx.spec.digits));
-            tp1 = Number(parsedTp1.toFixed(ctx.spec.digits));
-            tp2 = Number(parsedTp2.toFixed(ctx.spec.digits));
-
-            const slDistance = Math.abs(futureEntryReference - stopLoss) || validAtr;
-            let tpDistance = Math.abs(tp1 - futureEntryReference);
+            tpDistance = Math.abs(tp1 - futureEntryReference);
             rr = Number((tpDistance / slDistance).toFixed(2));
-
-            if (rr < 1.0) {
-              if (isSellDirection) {
-                tp1 = Number((futureEntryReference - slDistance * 1.2).toFixed(ctx.spec.digits));
-                tp2 = Number((futureEntryReference - slDistance * 2.0).toFixed(ctx.spec.digits));
-              } else {
-                tp1 = Number((futureEntryReference + slDistance * 1.2).toFixed(ctx.spec.digits));
-                tp2 = Number((futureEntryReference + slDistance * 2.0).toFixed(ctx.spec.digits));
-              }
-              tpDistance = Math.abs(tp1 - futureEntryReference);
-              rr = Number((tpDistance / slDistance).toFixed(2));
-            }
           }
 
           let triggerRequired = parsed.trigger_required || '';
@@ -1073,15 +1071,15 @@ Return strictly JSON matching this structure:
             multi_timeframe: defaultMtf,
             trade_plan: {
               entry_zone: {
-                min: isNoTrade ? 0 : entryZoneMin,
-                max: isNoTrade ? 0 : entryZoneMax,
+                min: entryZoneMin || futureEntryReference,
+                max: entryZoneMax || futureEntryReference,
               },
-              entry_price: isNoTrade ? 0 : Number(futureEntryReference.toFixed(ctx.spec.digits)),
-              planned_entry: isNoTrade ? 0 : Number(futureEntryReference.toFixed(ctx.spec.digits)),
-              stop_loss: isNoTrade ? 0 : Number(stopLoss.toFixed(ctx.spec.digits)),
-              take_profit_1: isNoTrade ? 0 : Number(tp1.toFixed(ctx.spec.digits)),
-              take_profit_2: isNoTrade ? 0 : Number(tp2.toFixed(ctx.spec.digits)),
-              risk_reward_ratio: isNoTrade ? 0 : rr,
+              entry_price: Number(futureEntryReference.toFixed(ctx.spec.digits)),
+              planned_entry: Number(futureEntryReference.toFixed(ctx.spec.digits)),
+              stop_loss: Number(stopLoss.toFixed(ctx.spec.digits)),
+              take_profit_1: Number(tp1.toFixed(ctx.spec.digits)),
+              take_profit_2: Number(tp2.toFixed(ctx.spec.digits)),
+              risk_reward_ratio: rr,
             },
             key_drivers: Array.isArray(parsed.primary_confluence) ? parsed.primary_confluence : [
               `${primaryTimeframe} primary trend alignment`,
@@ -1247,45 +1245,45 @@ Return strictly JSON matching this structure:
     const zoneBuffer = isCrypto ? (isScalping ? 100 : 250) : isForex ? (isScalping ? 0.0005 : 0.0015) : (isScalping ? 0.8 : 1.5);
     const slMultiplier = isScalping ? 1.25 : 1.15;
 
-    if (!isNoTrade) {
-      if (entry_mode === 'PULLBACK') {
-        if (potential_direction === 'BUY') {
-          entryZoneMin = Number((price - pullbackOffsetMin).toFixed(ctx.spec.digits));
-          entryZoneMax = Number((price - pullbackOffsetMax).toFixed(ctx.spec.digits));
-          entry_price = Number(((entryZoneMin + entryZoneMax) / 2).toFixed(ctx.spec.digits));
-          stop_loss = Number((entryZoneMin - atr * 0.8).toFixed(ctx.spec.digits));
-          tp1 = Number((entry_price + atr * 1.5).toFixed(ctx.spec.digits));
-          tp2 = Number((entry_price + atr * 2.8).toFixed(ctx.spec.digits));
-          tp3 = Number((entry_price + atr * 4.0).toFixed(ctx.spec.digits));
-        } else {
-          entryZoneMin = Number((price + pullbackOffsetMax).toFixed(ctx.spec.digits));
-          entryZoneMax = Number((price + pullbackOffsetMin).toFixed(ctx.spec.digits));
-          entry_price = Number(((entryZoneMin + entryZoneMax) / 2).toFixed(ctx.spec.digits));
-          stop_loss = Number((entryZoneMax + atr * 0.8).toFixed(ctx.spec.digits));
-          tp1 = Number((entry_price - atr * 1.5).toFixed(ctx.spec.digits));
-          tp2 = Number((entry_price - atr * 2.8).toFixed(ctx.spec.digits));
-          tp3 = Number((entry_price - atr * 4.0).toFixed(ctx.spec.digits));
-        }
+    const isSellDirection = potential_direction === 'SELL' || bias_signal === 'SELL';
+    if (entry_mode === 'PULLBACK') {
+      if (!isSellDirection) {
+        entryZoneMin = Number((price - pullbackOffsetMin).toFixed(ctx.spec.digits));
+        entryZoneMax = Number((price - pullbackOffsetMax).toFixed(ctx.spec.digits));
+        entry_price = Number(((entryZoneMin + entryZoneMax) / 2).toFixed(ctx.spec.digits));
+        stop_loss = Number((entryZoneMin - atr * 0.8).toFixed(ctx.spec.digits));
+        tp1 = Number((entry_price + atr * 1.5).toFixed(ctx.spec.digits));
+        tp2 = Number((entry_price + atr * 2.8).toFixed(ctx.spec.digits));
+        tp3 = Number((entry_price + atr * 4.0).toFixed(ctx.spec.digits));
       } else {
-        entryZoneMin = Number((price - zoneBuffer).toFixed(ctx.spec.digits));
-        entryZoneMax = Number((price + zoneBuffer).toFixed(ctx.spec.digits));
-        if (potential_direction === 'SELL' || bias_signal === 'SELL') {
-          stop_loss = Number((price + atr * slMultiplier).toFixed(ctx.spec.digits));
-          tp1 = Number((price - atr * 1.8).toFixed(ctx.spec.digits));
-          tp2 = Number((price - atr * 3.2).toFixed(ctx.spec.digits));
-          tp3 = Number((price - atr * 4.5).toFixed(ctx.spec.digits));
-        } else {
-          stop_loss = Number((price - atr * slMultiplier).toFixed(ctx.spec.digits));
-          tp1 = Number((price + atr * 1.8).toFixed(ctx.spec.digits));
-          tp2 = Number((price + atr * 3.2).toFixed(ctx.spec.digits));
-          tp3 = Number((price + atr * 4.5).toFixed(ctx.spec.digits));
-        }
+        entryZoneMin = Number((price + pullbackOffsetMax).toFixed(ctx.spec.digits));
+        entryZoneMax = Number((price + pullbackOffsetMin).toFixed(ctx.spec.digits));
+        entry_price = Number(((entryZoneMin + entryZoneMax) / 2).toFixed(ctx.spec.digits));
+        stop_loss = Number((entryZoneMax + atr * 0.8).toFixed(ctx.spec.digits));
+        tp1 = Number((entry_price - atr * 1.5).toFixed(ctx.spec.digits));
+        tp2 = Number((entry_price - atr * 2.8).toFixed(ctx.spec.digits));
+        tp3 = Number((entry_price - atr * 4.0).toFixed(ctx.spec.digits));
       }
-
-      const slDist = Math.abs(entry_price - stop_loss) || 1;
-      const tpDist = Math.abs(tp1 - entry_price);
-      rr = Number((tpDist / slDist).toFixed(2));
+    } else {
+      entryZoneMin = Number((price - zoneBuffer).toFixed(ctx.spec.digits));
+      entryZoneMax = Number((price + zoneBuffer).toFixed(ctx.spec.digits));
+      entry_price = price;
+      if (isSellDirection) {
+        stop_loss = Number((price + atr * slMultiplier).toFixed(ctx.spec.digits));
+        tp1 = Number((price - atr * 1.8).toFixed(ctx.spec.digits));
+        tp2 = Number((price - atr * 3.2).toFixed(ctx.spec.digits));
+        tp3 = Number((price - atr * 4.5).toFixed(ctx.spec.digits));
+      } else {
+        stop_loss = Number((price - atr * slMultiplier).toFixed(ctx.spec.digits));
+        tp1 = Number((price + atr * 1.8).toFixed(ctx.spec.digits));
+        tp2 = Number((price + atr * 3.2).toFixed(ctx.spec.digits));
+        tp3 = Number((price + atr * 4.5).toFixed(ctx.spec.digits));
+      }
     }
+
+    const slDist = Math.abs(entry_price - stop_loss) || 1;
+    const tpDist = Math.abs(tp1 - entry_price);
+    rr = Number((tpDist / slDist).toFixed(2));
 
     const setup_quality = confidence >= 85 ? 'VERY STRONG' : confidence >= 75 ? 'STRONG' : confidence >= 65 ? 'MODERATE' : 'WEAK';
     const invalidation = isNoTrade ? '—' : `${bias_signal} setup becomes invalid if ${isScalping ? 'M1/M5' : 'M15/H1'} closes beyond Stop Loss ($${stop_loss.toFixed(ctx.spec.digits)})`;

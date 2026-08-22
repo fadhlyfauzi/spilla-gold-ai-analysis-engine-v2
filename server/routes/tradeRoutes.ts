@@ -150,8 +150,24 @@ tradeRouter.post('/execute', requireAuth, async (req: any, res: any) => {
     // 3. Execute order through authoritative server-side execution & risk gate
     // CRITICAL: order.symbol must ALWAYS be the canonical SPILLA GOLD symbol (e.g. BTCUSD, XAUUSD, EURUSD)
     // Broker-specific symbol (e.g. BTCUSD.edge) is stored separately as brokerSymbol and used by the MT5 mapping layer
+    const numEntry = Number(payload.entryPrice ?? payload.entry_price ?? payload.capturePrice ?? payload.capture_price);
+    const numSL = Number(payload.stopLoss ?? payload.stop_loss ?? payload.sl);
+    const numTP1 = Number(payload.takeProfit1 ?? payload.take_profit_1 ?? payload.tp1 ?? payload.takeProfit ?? payload.take_profit ?? payload.take_profit1);
+    const numTP2 = payload.takeProfit2 !== null && payload.takeProfit2 !== undefined ? Number(payload.takeProfit2) : (payload.take_profit_2 ? Number(payload.take_profit_2) : (payload.tp2 ? Number(payload.tp2) : null));
+    const numLot = Number(payload.lot ?? payload.volume);
+
+    // Temporary Diagnostic Logging
+    console.log(
+      `[EXECUTION PAYLOAD]\nSymbol=${canonicalSymbol}\nSide=${payload.side}\nEntry=${numEntry}\nSL=${numSL}\nTP1=${numTP1}\nTP2=${numTP2 ?? '—'}\nLot=${numLot}`
+    );
+
     const orderPayload = {
       ...payload,
+      entryPrice: numEntry,
+      stopLoss: numSL,
+      takeProfit1: numTP1,
+      takeProfit2: numTP2,
+      lot: numLot,
       tradingAccountId: tradingAccount.id,
       accountNumber: tradingAccount.accountNumber,
       accountId: tradingAccount.accountNumber,
