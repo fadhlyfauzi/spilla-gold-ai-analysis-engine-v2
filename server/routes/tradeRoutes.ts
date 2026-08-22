@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { tradeService, MT5_EXECUTION_MODE } from '../services/tradeService.js';
+import { symbolService } from '../services/symbolService.js';
 import { getPrismaClient } from '../db/prisma.js';
 import { requireAuth, isWorkerOnline } from './mt5WorkerRoutes.js';
 
@@ -133,11 +134,12 @@ tradeRouter.post('/execute', requireAuth, async (req: any, res: any) => {
       }
     }
 
-    // 2. Resolve broker execution symbol from connected account
+    // 2. Resolve broker execution symbol from canonical symbol and connected account
+    const inputSymbol = payload.canonicalSymbol || payload.symbol || 'XAUUSD';
     const brokerSymbol =
-      tradingAccount.symbol && tradingAccount.symbol.trim()
-        ? tradingAccount.symbol.trim()
-        : payload.symbol || 'XAUUSD';
+      payload.brokerSymbol && payload.brokerSymbol.trim()
+        ? payload.brokerSymbol.trim()
+        : symbolService.mapCanonicalToBroker(inputSymbol, tradingAccount.symbol);
 
     // 3. Execute order through authoritative server-side execution & risk gate
     const orderPayload = {

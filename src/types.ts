@@ -423,6 +423,10 @@ export interface SymbolSpecification {
   volumeMin: number;
   volumeMax: number;
   volumeStep: number;
+  minLot?: number;
+  maxLot?: number;
+  lotStep?: number;
+  maxTestLot: number;
   digits: number;
   point: number;
   stopsLevel: number;
@@ -454,6 +458,9 @@ export interface PositionSizingResult {
   risk_amount: number;
   calculated_lot: number;
   normalized_lot: number;
+  safety_cap_lot: number;
+  final_execution_lot: number;
+  is_capped_by_safety: boolean;
   estimated_loss_at_sl: number;
   margin_required: number;
   lot_validation: {
@@ -805,8 +812,13 @@ export interface CanonicalExecutionParameters {
   signalId: string;
   snapshotId: string;
   symbol: string;
+  canonicalSymbol?: string;
+  brokerSymbol?: string;
   side: 'BUY' | 'SELL';
   lot: number;
+  calculatedLot?: number;
+  safetyCapLot?: number;
+  finalExecutionLot?: number;
   entryPrice: number;
   stopLoss: number;
   takeProfit1: number;

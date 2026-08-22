@@ -126,7 +126,10 @@ export const createExecutionParametersFromSnapshot = (
   }
   tp2 = Number(tp2.toFixed(specDigits));
 
-  const lot = Number((sizing.normalized_lot ?? fallbackLot ?? 0.10).toFixed(2));
+  const calculatedLot = Number((sizing.calculated_lot ?? sizing.normalized_lot ?? fallbackLot ?? 0.01).toFixed(4));
+  const safetyCapLot = Number((sizing.safety_cap_lot ?? 0.01).toFixed(2));
+  const finalLot = Number((sizing.final_execution_lot ?? Math.min(sizing.normalized_lot ?? 0.01, safetyCapLot)).toFixed(2));
+  const lot = finalLot;
   const riskPct = Number((sizing.risk_percent ?? fallbackRiskPct ?? 1.0).toFixed(2));
   const estLoss = Number((sizing.estimated_loss_at_sl ?? (fallbackEq * (riskPct / 100))).toFixed(2));
   const conf = Number(snap.confidence ?? 85);
@@ -143,8 +146,13 @@ export const createExecutionParametersFromSnapshot = (
     signalId: sigId,
     snapshotId: snapId,
     symbol: currentSym,
+    canonicalSymbol: currentSym,
+    brokerSymbol: currentSym,
     side,
     lot,
+    calculatedLot,
+    safetyCapLot,
+    finalExecutionLot: lot,
     entryPrice: entry,
     stopLoss: sl,
     takeProfit1: tp1,
@@ -892,9 +900,13 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
         });
         setExecutionParameters((prev) => {
           if (!prev) return null;
+          const finalLot = Number((data.positionSizing.final_execution_lot ?? data.positionSizing.normalized_lot ?? prev.lot).toFixed(2));
           return {
             ...prev,
-            lot: Number((data.positionSizing.normalized_lot ?? prev.lot).toFixed(2)),
+            lot: finalLot,
+            calculatedLot: data.positionSizing.calculated_lot ?? prev.calculatedLot,
+            safetyCapLot: data.positionSizing.safety_cap_lot ?? prev.safetyCapLot,
+            finalExecutionLot: finalLot,
             riskPercent: Number((data.positionSizing.risk_percent ?? prev.riskPercent).toFixed(2)),
             estimatedLoss: Number((data.positionSizing.estimated_loss_at_sl ?? prev.estimatedLoss).toFixed(2)),
           };
@@ -1274,7 +1286,10 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
                 ) : (
                   <>
                     <option value="XAUUSD" className="bg-[#121620] text-white">
-                      XAUUSD (Gold)
+                      XAUUSD (Metals)
+                    </option>
+                    <option value="XAUUSD.CENT" className="bg-[#121620] text-white">
+                      XAUUSD.CENT (Cent Metals)
                     </option>
                     <option value="EURUSD" className="bg-[#121620] text-white">
                       EURUSD (Forex)
@@ -2500,19 +2515,44 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
                 </div>
                 <div className="flex justify-between items-center pb-1.5 border-b border-gray-800/60">
                   <span className="text-gray-400 text-[11px]">Symbol & Side:</span>
-                  <span className={`font-black text-xs px-2 py-0.5 rounded ${
-                    params.side === 'BUY'
-                      ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                      : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
-                  }`}>
-                    {params.symbol} • {params.side}
-                  </span>
-                </div>
-                <div className="grid grid-cols-2 gap-2 text-[11px]">
-                  <div>
-                    <span className="text-gray-500 block text-[10px]">Calculated Volume:</span>
-                    <span className="text-blue-400 font-extrabold font-mono">{params.lot.toFixed(2)} Lots</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-gray-400 font-mono">
+                      {params.canonicalSymbol || params.symbol}
+                      {connectedAccount?.symbol && connectedAccount.symbol !== params.symbol ? ` → ${connectedAccount.symbol}` : ''}
+                    </span>
+                    <span className={`font-black text-xs px-2 py-0.5 rounded ${
+                      params.side === 'BUY'
+                        ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                        : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
+                    }`}>
+                      {params.side}
+                    </span>
                   </div>
+                </div>
+
+                {/* Position Sizing & Safety Cap Breakdown */}
+                <div className="p-2.5 rounded-lg bg-[#121620] border border-gray-800 space-y-1.5">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-gray-400">Calculated Mathematical Lot:</span>
+                    <span className="text-gray-300 font-mono">{(params.calculatedLot ?? params.lot).toFixed(2)} Lots</span>
+                  </div>
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-gray-400">Hard Safety Cap (Test Mode):</span>
+                    <span className="text-[#E5B842] font-mono font-bold">{(params.safetyCapLot ?? 0.01).toFixed(2)} Lots</span>
+                  </div>
+                  <div className="flex items-center justify-between text-[11px] pt-1 border-t border-gray-800">
+                    <span className="text-white font-bold">Final Execution Lot (SSOT):</span>
+                    <span className="text-emerald-400 font-black font-mono text-xs">{params.lot.toFixed(2)} Lots</span>
+                  </div>
+                  {params.calculatedLot && params.calculatedLot > params.lot && (
+                    <div className="flex items-center gap-1.5 text-[10px] text-[#E5B842] bg-[#E5B842]/10 px-2 py-1 rounded border border-[#E5B842]/30 mt-1">
+                      <Shield className="w-3 h-3 text-[#E5B842] shrink-0" />
+                      <span>Safety Cap Active: Capped from {params.calculatedLot.toFixed(2)} to {params.lot.toFixed(2)} Lots</span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 text-[11px] pt-1">
                   <div>
                     <span className="text-gray-500 block text-[10px]">Entry Price:</span>
                     <span className="text-white font-bold font-mono">${params.entryPrice.toFixed(currentSymbolSpec.digits || 2)}</span>
@@ -2531,8 +2571,8 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
                       1 : {calculatedRR.toFixed(2)} <span className="text-[9px] text-gray-400 font-normal">(Advisory)</span>
                     </span>
                   </div>
-                  <div>
-                    <span className="text-gray-500 block text-[10px]">Risk % / Max Loss:</span>
+                  <div className="col-span-2">
+                    <span className="text-gray-500 block text-[10px]">Risk % / Estimated Loss:</span>
                     <span className="text-amber-300 font-bold font-mono">{params.riskPercent}% (${params.estimatedLoss.toFixed(2)})</span>
                   </div>
                 </div>

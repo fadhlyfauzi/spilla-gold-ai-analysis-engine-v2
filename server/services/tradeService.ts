@@ -1,4 +1,5 @@
 import { TradeExecutionOrder, TradeOrderStatus } from '../../src/types.js';
+import { symbolService } from './symbolService.js';
 
 export const MT5_EXECUTION_MODE: 'TEST' | 'LIVE' = 'TEST';
 export const CLAIM_TIMEOUT_MS = 60 * 1000; // 60 seconds claim timeout protection
@@ -197,6 +198,20 @@ export class TradeService {
         code: 'INVALID_VOLUME',
         message: 'ORDER DISPATCH REJECTED: Lot size must be a positive finite number greater than 0.',
       };
+    }
+
+    const targetSymbol = payload.symbol || 'XAUUSD';
+    const spec = symbolService.getSymbol(targetSymbol);
+    if (MT5_EXECUTION_MODE === 'TEST') {
+      const allowedMaxLot = spec.maxTestLot || 0.01;
+      if (numericLot > allowedMaxLot + 0.0001) {
+        return {
+          valid: false,
+          statusCode: 400,
+          code: 'TEST_SAFETY_CAP_EXCEEDED',
+          message: `ORDER DISPATCH REJECTED: Lot size ${numericLot} exceeds hard test safety cap of ${allowedMaxLot} for ${spec.symbol}.`,
+        };
+      }
     }
 
     // 9. Entry Price Validation
