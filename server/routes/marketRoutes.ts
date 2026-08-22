@@ -6,17 +6,10 @@ export const marketRouter = Router();
 
 // GET /api/market/current - Live price and ticker from single source of truth
 marketRouter.get('/current', async (req, res) => {
+  const reqSym = (req.query.symbol as string) || 'XAUUSD';
   marketDataService.logMarketDataDebug('GET_CURRENT');
-  await marketDataService.fetchFreshestMarketPrice().catch(() => {});
-  const liveMarket = marketDataService.getLiveMarket();
-  
-  // Requirement 8: If returned symbol is not XAUUSD Spot Gold, reject response
-  if (liveMarket.symbol !== 'XAUUSD') {
-    return res.status(400).json({
-      error: 'SYMBOL_REJECTED',
-      message: `Returned symbol '${liveMarket.symbol}' is not XAUUSD Spot Gold.`,
-    });
-  }
+  await marketDataService.fetchFreshestMarketPrice(reqSym).catch(() => {});
+  const liveMarket = marketDataService.getLiveMarket(reqSym);
 
   const validation = marketDataService.validateSync();
   res.json({
@@ -28,11 +21,12 @@ marketRouter.get('/current', async (req, res) => {
 
 // GET /api/market/canonical - Fast canonical market snapshot for Analysis Now
 marketRouter.get('/canonical', async (req, res) => {
-  const price = await marketDataService.fetchFreshestMarketPrice();
-  const liveMarket = marketDataService.getLiveMarket();
+  const reqSym = (req.query.symbol as string) || 'XAUUSD';
+  const price = await marketDataService.fetchFreshestMarketPrice(reqSym).catch(() => null);
+  const liveMarket = marketDataService.getLiveMarket(reqSym);
   res.json({
     success: true,
-    symbol: 'XAUUSD',
+    symbol: liveMarket.symbol || reqSym,
     price: price || liveMarket.price,
     last: price || liveMarket.price,
     bid: liveMarket.bid,

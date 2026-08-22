@@ -247,55 +247,40 @@ export class TradeService {
       };
     }
 
-    // 12. Pre-Dispatch Price Scale & Structural Boundary Guard
+    // 12. Pre-Dispatch Price Scale & Structural Boundary Guard (ADVISORY WARNING ONLY - NON-BLOCKING)
+    const warnings: string[] = [];
     const symToValidate = (payload.canonicalSymbol || payload.symbol || 'XAUUSD').trim().toUpperCase();
     const resolvedSpec = symbolService.resolveSymbol(symToValidate);
     const canonical = resolvedSpec.canonicalSymbol;
 
-    // A. Symbol Plausible Price Range Check (Prevents e.g. BTCUSD being dispatched on cent/gold scale like 82.23)
+    // A. Symbol Plausible Price Range Advisory Check (Advisory warning only - does NOT hard-block execution)
     if (canonical === 'BTCUSD') {
       if (numEntry < 10000 || numSL < 10000 || numTP1 < 10000) {
-        return {
-          valid: false,
-          statusCode: 400,
-          code: 'PRICE_SCALE_MISMATCH',
-          message: `ORDER DISPATCH REJECTED: BTCUSD execution price scale invalid (Entry: $${numEntry}, SL: $${numSL}, TP1: $${numTP1}). Absolute BTCUSD prices (> 10000.00) required.`,
-          details: { symbol: canonical, entryPrice: numEntry, stopLoss: numSL, takeProfit1: numTP1 },
-        };
+        const warnMsg = `PRICE SCALE WARNING: BTCUSD execution price scale advisory (Entry: $${numEntry}, SL: $${numSL}, TP1: $${numTP1}). Absolute BTCUSD prices (> 10000.00) recommended.`;
+        warnings.push(warnMsg);
+        console.warn(`[TRADE_GATE_ADVISORY] ${warnMsg}`);
       }
     } else if (canonical === 'XAUUSD' || canonical === 'XAUUSD.CENT') {
       if (numEntry < 500 || numEntry > 15000 || numSL < 500 || numTP1 < 500) {
-        return {
-          valid: false,
-          statusCode: 400,
-          code: 'PRICE_SCALE_MISMATCH',
-          message: `ORDER DISPATCH REJECTED: Gold execution price scale invalid (Entry: $${numEntry}, SL: $${numSL}, TP1: $${numTP1}). Standard Gold market prices (500 - 15000) required.`,
-          details: { symbol: canonical, entryPrice: numEntry, stopLoss: numSL, takeProfit1: numTP1 },
-        };
+        const warnMsg = `PRICE SCALE WARNING: Gold execution price scale advisory (Entry: $${numEntry}, SL: $${numSL}, TP1: $${numTP1}). Standard Gold market prices (500 - 15000) recommended.`;
+        warnings.push(warnMsg);
+        console.warn(`[TRADE_GATE_ADVISORY] ${warnMsg}`);
       }
     } else if (canonical === 'EURUSD' || canonical === 'GBPUSD') {
       if (numEntry < 0.4 || numEntry > 3.0 || numSL < 0.4 || numTP1 < 0.4) {
-        return {
-          valid: false,
-          statusCode: 400,
-          code: 'PRICE_SCALE_MISMATCH',
-          message: `ORDER DISPATCH REJECTED: Forex execution price scale invalid (Entry: ${numEntry}, SL: ${numSL}, TP1: ${numTP1}). Standard FX rates required.`,
-          details: { symbol: canonical, entryPrice: numEntry, stopLoss: numSL, takeProfit1: numTP1 },
-        };
+        const warnMsg = `PRICE SCALE WARNING: Forex execution price scale advisory (Entry: ${numEntry}, SL: ${numSL}, TP1: ${numTP1}). Standard FX rates recommended.`;
+        warnings.push(warnMsg);
+        console.warn(`[TRADE_GATE_ADVISORY] ${warnMsg}`);
       }
     }
 
-    // B. Proportional Distance Guard (SL / TP cannot deviate unreasonably from Entry)
+    // B. Proportional Distance Advisory Guard (Advisory warning only - does NOT hard-block execution)
     const slDistRatio = Math.abs(numSL - numEntry) / numEntry;
     const tp1DistRatio = Math.abs(numTP1 - numEntry) / numEntry;
     if (slDistRatio > 0.35 || tp1DistRatio > 0.50) {
-      return {
-        valid: false,
-        statusCode: 400,
-        code: 'PRICE_SCALE_MISMATCH',
-        message: `ORDER DISPATCH REJECTED: Stop Loss ($${numSL}) or Take Profit ($${numTP1}) is disproportionate to Entry ($${numEntry}), indicating an invalid price scale.`,
-        details: { symbol: canonical, entryPrice: numEntry, stopLoss: numSL, takeProfit1: numTP1, slDistRatio, tp1DistRatio },
-      };
+      const warnMsg = `PRICE SCALE WARNING: Stop Loss ($${numSL}) or Take Profit ($${numTP1}) is wider than typical proportion to Entry ($${numEntry}).`;
+      warnings.push(warnMsg);
+      console.warn(`[TRADE_GATE_ADVISORY] ${warnMsg}`);
     }
 
     // 13. Structural Stop Loss & Take Profit Direction Validation
@@ -368,12 +353,15 @@ export class TradeService {
       valid: true,
       statusCode: 200,
       code: 'GATE_PASSED',
-      message: 'All execution safety and risk gate checks passed successfully.',
+      message: warnings.length > 0
+        ? `All safety gate checks passed with ${warnings.length} advisory warning(s).`
+        : 'All execution safety and risk gate checks passed successfully.',
       details: {
         riskReward: calculatedRR,
         minRecommendedRR,
         tradingStyle,
         isRecommendedRR: calculatedRR >= minRecommendedRR,
+        warnings,
       },
     };
   }

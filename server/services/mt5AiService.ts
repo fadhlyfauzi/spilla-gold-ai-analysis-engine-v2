@@ -51,7 +51,7 @@ class Mt5AiService {
    */
   public async processMt5Payload(payload: Partial<Mt5Payload>): Promise<{ mt5Data: Mt5Payload; analysis: Mt5AiAnalysisResult }> {
     // Merge payload with defaults using live market price
-    const rawSymbol = payload.symbol || 'XAUUSD.cent';
+    const rawSymbol = payload.symbol || 'XAUUSD';
     const resolved = symbolService.resolveSymbol(rawSymbol);
     const isCent = resolved.isCentAccount;
     const digits = resolved.spec.digits || 2;

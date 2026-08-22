@@ -715,7 +715,20 @@ Return strictly JSON matching this structure:
           const currentPrice = (detectedFromVision > 100 && Math.abs(detectedFromVision - price) < 1000)
             ? detectedFromVision
             : price;
-          const atr = sc.atr14?.value || 14.8;
+          
+          const symbolUpper = (ctx.symbol || ctx.spec?.symbol || '').toUpperCase();
+          const isCrypto = symbolUpper.includes('BTC');
+          const isForex = ctx.spec?.category === 'FOREX' || ctx.spec?.digits === 5 || ctx.spec?.digits === 3;
+          const isScalping = tradingStyle === 'SCALPING';
+          let defaultAtr = 14.8;
+          if (isCrypto) defaultAtr = 650.0;
+          else if (ctx.spec?.digits === 5) defaultAtr = 0.0035;
+          else if (ctx.spec?.digits === 3) defaultAtr = 0.45;
+
+          let rawAtrVal = sc.atr14?.value || defaultAtr;
+          if (isCrypto && rawAtrVal < 50) rawAtrVal = 650.0;
+          if (isForex && rawAtrVal > 10) rawAtrVal = defaultAtr;
+          const atr = rawAtrVal;
 
           // CHECK A: Is capturePrice valid?
           if (!currentPrice || currentPrice <= 0 || isNaN(currentPrice)) {
@@ -849,17 +862,21 @@ Return strictly JSON matching this structure:
           let plannedZone = '—';
 
           if (!isNoTrade) {
+            const offsetMin = isCrypto ? (isScalping ? 150 : 450) : isForex ? (isScalping ? 0.0008 : 0.0025) : (isScalping ? 0.6 : 3.5);
+            const offsetMax = isCrypto ? (isScalping ? 50 : 180) : isForex ? (isScalping ? 0.0003 : 0.0010) : (isScalping ? 0.2 : 1.0);
+            const buffer = isCrypto ? (isScalping ? 100 : 250) : isForex ? (isScalping ? 0.0005 : 0.0015) : (isScalping ? 0.8 : 1.5);
+
             if (entryMode === 'PULLBACK') {
               if (potentialDir === 'BUY') {
-                entryZoneMin = Number((currentPrice - 3.5).toFixed(ctx.spec.digits));
-                entryZoneMax = Number((currentPrice - 1.0).toFixed(ctx.spec.digits));
+                entryZoneMin = Number((currentPrice - offsetMin).toFixed(ctx.spec.digits));
+                entryZoneMax = Number((currentPrice - offsetMax).toFixed(ctx.spec.digits));
               } else {
-                entryZoneMin = Number((currentPrice + 1.0).toFixed(ctx.spec.digits));
-                entryZoneMax = Number((currentPrice + 3.5).toFixed(ctx.spec.digits));
+                entryZoneMin = Number((currentPrice + offsetMax).toFixed(ctx.spec.digits));
+                entryZoneMax = Number((currentPrice + offsetMin).toFixed(ctx.spec.digits));
               }
             } else {
-              entryZoneMin = Number((currentPrice - 1.5).toFixed(ctx.spec.digits));
-              entryZoneMax = Number((currentPrice + 1.5).toFixed(ctx.spec.digits));
+              entryZoneMin = Number((currentPrice - buffer).toFixed(ctx.spec.digits));
+              entryZoneMax = Number((currentPrice + buffer).toFixed(ctx.spec.digits));
             }
 
             if (parsed.entry_zone_min && parsed.entry_zone_max && !isNaN(parsed.entry_zone_min) && !isNaN(parsed.entry_zone_max)) {
@@ -1074,8 +1091,22 @@ Return strictly JSON matching this structure:
   private generateDeterministicAnalysis(ctx: any, defaultMtf: any): StandardizedAiAnalysis {
     const price = ctx.marketSnapshot ? ctx.marketSnapshot.mid_price : ctx.currentPrice;
     const isScalping = ctx.tradingStyle === 'SCALPING';
-    const rawAtr = ctx.technical.atr14 || 14.8;
-    const atr = isScalping ? Math.min(3.8, Math.max(1.5, rawAtr * 0.22)) : rawAtr;
+    
+    const symbolUpper = (ctx.symbol || ctx.spec?.symbol || '').toUpperCase();
+    const isCrypto = symbolUpper.includes('BTC');
+    const isForex = ctx.spec?.category === 'FOREX' || ctx.spec?.digits === 5 || ctx.spec?.digits === 3;
+    let defaultAtr = 14.8;
+    if (isCrypto) defaultAtr = 650.0;
+    else if (ctx.spec?.digits === 5) defaultAtr = 0.0035;
+    else if (ctx.spec?.digits === 3) defaultAtr = 0.45;
+
+    let rawAtr = (ctx.technical?.atr14 && ctx.technical.atr14 > 0) ? ctx.technical.atr14 : defaultAtr;
+    if (isCrypto && rawAtr < 50) rawAtr = 650.0;
+    if (isForex && rawAtr > 10) rawAtr = defaultAtr;
+
+    const atr = isScalping
+      ? (isCrypto ? rawAtr * 0.35 : isForex ? rawAtr * 0.40 : Math.min(3.8, Math.max(1.5, rawAtr * 0.22)))
+      : rawAtr;
     const pivots = ctx.technical.pivotPoints;
     const score = ctx.technical.score;
     const sc = ctx.structuredCapture;
@@ -1196,9 +1227,9 @@ Return strictly JSON matching this structure:
     let entryZoneMin = 0;
     let entryZoneMax = 0;
 
-    const pullbackOffsetMin = isScalping ? 0.6 : 3.5;
-    const pullbackOffsetMax = isScalping ? 0.2 : 1.0;
-    const zoneBuffer = isScalping ? 0.8 : 1.5;
+    const pullbackOffsetMin = isCrypto ? (isScalping ? 150 : 450) : isForex ? (isScalping ? 0.0008 : 0.0025) : (isScalping ? 0.6 : 3.5);
+    const pullbackOffsetMax = isCrypto ? (isScalping ? 50 : 180) : isForex ? (isScalping ? 0.0003 : 0.0010) : (isScalping ? 0.2 : 1.0);
+    const zoneBuffer = isCrypto ? (isScalping ? 100 : 250) : isForex ? (isScalping ? 0.0005 : 0.0015) : (isScalping ? 0.8 : 1.5);
     const slMultiplier = isScalping ? 1.25 : 1.15;
 
     if (!isNoTrade) {

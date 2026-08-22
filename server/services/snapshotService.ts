@@ -229,7 +229,7 @@ class SnapshotService {
     currentPriceParam?: number
   ): Promise<MultimodalAnalysisResult> {
     const snapshot = customSnapshot || this.latestSnapshot;
-    const snapshotSymbol = snapshot?.symbol || 'XAUUSD.cent';
+    const snapshotSymbol = snapshot?.symbol || 'XAUUSD';
     const resolved = symbolService.resolveSymbol(snapshotSymbol);
     const isCent = resolved.isCentAccount;
     const digits = resolved.spec.digits || 2;
