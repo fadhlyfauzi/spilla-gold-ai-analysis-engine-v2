@@ -108,6 +108,8 @@ class MarketDataService {
     ['USDJPY', 154.200],
   ]);
 
+  private symbolCandles: Map<string, Record<string, Candle[]>> = new Map();
+
   public async fetchFreshestMarketPrice(symbol: string = 'XAUUSD'): Promise<number> {
     const resolved = symbolService.resolveSymbol(symbol);
     const canonical = resolved.canonicalSymbol;
@@ -155,36 +157,39 @@ class MarketDataService {
    * Builds deterministic historical candle structure starting from real benchmark prices.
    * Eliminates any random generation during runtime.
    */
-  private buildDeterministicBaseCandles(anchorPrice: number): Record<string, Candle[]> {
+  private buildDeterministicBaseCandles(anchorPrice: number, digits: number = 2): Record<string, Candle[]> {
     const result: Record<string, Candle[]> = {};
     const nowSec = Math.floor(Date.now() / 1000);
+    const isCrypto = anchorPrice > 10000;
+    const isForex = digits === 5 || digits === 3;
+    const scaleFactor = isCrypto ? (anchorPrice / 4470) : isForex ? (anchorPrice / 4470) : 1.0;
 
     const timeframes = [
-      { name: 'M1', sec: 60, step: 0.15 },
-      { name: 'M5', sec: 300, step: 0.45 },
-      { name: 'M10', sec: 600, step: 0.75 },
-      { name: 'M15', sec: 900, step: 1.10 },
-      { name: 'M30', sec: 1800, step: 2.20 },
-      { name: 'H1', sec: 3600, step: 3.80 },
-      { name: 'H4', sec: 14400, step: 8.50 },
-      { name: 'D1', sec: 86400, step: 18.20 },
-      { name: 'W1', sec: 604800, step: 42.00 },
-      { name: 'MN', sec: 2592000, step: 95.00 },
+      { name: 'M1', sec: 60, step: 0.15 * scaleFactor },
+      { name: 'M5', sec: 300, step: 0.45 * scaleFactor },
+      { name: 'M10', sec: 600, step: 0.75 * scaleFactor },
+      { name: 'M15', sec: 900, step: 1.10 * scaleFactor },
+      { name: 'M30', sec: 1800, step: 2.20 * scaleFactor },
+      { name: 'H1', sec: 3600, step: 3.80 * scaleFactor },
+      { name: 'H4', sec: 14400, step: 8.50 * scaleFactor },
+      { name: 'D1', sec: 86400, step: 18.20 * scaleFactor },
+      { name: 'W1', sec: 604800, step: 42.00 * scaleFactor },
+      { name: 'MN', sec: 2592000, step: 95.00 * scaleFactor },
     ];
 
     timeframes.forEach(({ name, sec, step }) => {
       const list: Candle[] = [];
       const count = 120;
-      let runningPrice = anchorPrice - count * 0.05;
+      let runningPrice = anchorPrice - count * (0.05 * scaleFactor);
 
       for (let i = count; i >= 0; i--) {
         const time = nowSec - i * sec;
         // Deterministic sinusoidal wave pattern for realistic institutional structure
         const sineShift = Math.sin(i * 0.15) * step;
-        const open = Number(runningPrice.toFixed(2));
-        const close = Number((runningPrice + sineShift).toFixed(2));
-        const high = Number((Math.max(open, close) + Math.abs(sineShift) * 0.4).toFixed(2));
-        const low = Number((Math.min(open, close) - Math.abs(sineShift) * 0.4).toFixed(2));
+        const open = Number(runningPrice.toFixed(digits));
+        const close = Number((runningPrice + sineShift).toFixed(digits));
+        const high = Number((Math.max(open, close) + Math.abs(sineShift) * 0.4).toFixed(digits));
+        const low = Number((Math.min(open, close) - Math.abs(sineShift) * 0.4).toFixed(digits));
         const volume = 1500 + Math.abs(Math.floor(sineShift * 300));
 
         list.push({ time, open, high, low, close, volume });
@@ -264,11 +269,31 @@ class MarketDataService {
     return { ...this.cache.liveMarket };
   }
 
-  public getCandles(timeframe: string = 'H1'): Candle[] {
-    const list = this.cache.candles[timeframe] || this.cache.candles['H1'] || [];
-    // Always guarantee the latest candle close is synchronized
+  public getCandles(timeframe: string = 'H1', symbol?: string, anchorPrice?: number): Candle[] {
+    const resolved = symbol ? symbolService.resolveSymbol(symbol) : symbolService.resolveSymbol(this.cache.liveMarket.symbol || 'XAUUSD');
+    const canonical = resolved.canonicalSymbol;
+    const price = (anchorPrice && anchorPrice > 0) ? anchorPrice : this.getCurrentPrice(canonical);
+    const digits = resolved.spec.digits || 2;
+
+    if (canonical === 'XAUUSD' && !anchorPrice) {
+      const list = this.cache.candles[timeframe] || this.cache.candles['H1'] || [];
+      if (list.length > 0) {
+        list[list.length - 1].close = price;
+      }
+      return list;
+    }
+
+    let symbolCandleSet = this.symbolCandles.get(canonical);
+    if (!symbolCandleSet) {
+      symbolCandleSet = this.buildDeterministicBaseCandles(price, digits);
+      this.symbolCandles.set(canonical, symbolCandleSet);
+    }
+
+    const list = symbolCandleSet[timeframe] || symbolCandleSet['H1'] || [];
     if (list.length > 0) {
-      list[list.length - 1].close = this.cache.currentPrice;
+      list[list.length - 1].close = price;
+      if (price > list[list.length - 1].high) list[list.length - 1].high = price;
+      if (price < list[list.length - 1].low) list[list.length - 1].low = price;
     }
     return list;
   }

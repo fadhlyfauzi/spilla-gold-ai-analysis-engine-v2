@@ -1,5 +1,6 @@
 import { TechnicalScore, SentimentType, SupportResistance } from '../../src/types.js';
 import { marketDataService } from '../services/marketDataService.js';
+import { symbolService } from '../services/symbolService.js';
 
 export interface TimeframeTechnicalData {
   trend: 'BULLISH' | 'BEARISH' | 'RANGE' | 'SIDEWAYS' | 'TRANSITION';
@@ -210,19 +211,25 @@ export class TechnicalEngine {
     anchorPrice?: number,
     tradingStyle: 'SCALPING' | 'INTRADAY' = 'INTRADAY'
   ): StructuredTechnicalCapture {
-    const currentPrice = (anchorPrice && anchorPrice > 0) ? anchorPrice : marketDataService.getCurrentPrice();
+    const resolved = symbolService.resolveSymbol(symbol);
+    const spec = resolved.spec;
+    const digits = spec.digits || 2;
+    const isCrypto = symbol.toUpperCase().includes('BTC') || spec.category === 'CRYPTO';
+    const isForex = spec.category === 'FOREX';
+
+    const currentPrice = (anchorPrice && anchorPrice > 0) ? anchorPrice : marketDataService.getCurrentPrice(symbol);
     if (anchorPrice && anchorPrice > 0) {
       marketDataService.updatePriceFromProvider(currentPrice, 'STRUCTURED_CAPTURE_ANCHOR');
     }
-    const candlesSelected = marketDataService.getCandles(timeframe) || marketDataService.getCandles('H1');
-    const candlesH1 = marketDataService.getCandles('H1');
-    const candlesD1 = marketDataService.getCandles('D1');
-    const candlesH4 = marketDataService.getCandles('H4');
-    const candlesM30 = marketDataService.getCandles('M30');
-    const candlesM15 = marketDataService.getCandles('M15');
-    const candlesM10 = marketDataService.getCandles('M10');
-    const candlesM5 = marketDataService.getCandles('M5');
-    const candlesM1 = marketDataService.getCandles('M1');
+    const candlesSelected = marketDataService.getCandles(timeframe, symbol, currentPrice) || marketDataService.getCandles('H1', symbol, currentPrice);
+    const candlesH1 = marketDataService.getCandles('H1', symbol, currentPrice);
+    const candlesD1 = marketDataService.getCandles('D1', symbol, currentPrice);
+    const candlesH4 = marketDataService.getCandles('H4', symbol, currentPrice);
+    const candlesM30 = marketDataService.getCandles('M30', symbol, currentPrice);
+    const candlesM15 = marketDataService.getCandles('M15', symbol, currentPrice);
+    const candlesM10 = marketDataService.getCandles('M10', symbol, currentPrice);
+    const candlesM5 = marketDataService.getCandles('M5', symbol, currentPrice);
+    const candlesM1 = marketDataService.getCandles('M1', symbol, currentPrice);
 
     // Use selected timeframe's candles for indicator precision calculations
     const closes = (candlesSelected.length > 0 ? candlesSelected : candlesH1).map((c) => c.close);
@@ -479,25 +486,44 @@ export class TechnicalEngine {
     if (isInc('SUPPORT_RESISTANCE')) {
       const recentHighs = highs.slice(-30).sort((a, b) => b - a);
       const recentLows = lows.slice(-30).sort((a, b) => a - b);
-      const nearestResistance = Number((recentHighs[0] || currentPrice + 15).toFixed(2));
-      const secondaryResistance = Number(((recentHighs[0] || currentPrice + 15) + 12).toFixed(2));
-      const nearestSupport = Number((recentLows[0] || currentPrice - 15).toFixed(2));
-      const secondarySupport = Number(((recentLows[0] || currentPrice - 15) - 12).toFixed(2));
+      const defaultSrDist = isCrypto ? 350.0 : isForex ? (digits === 3 ? 0.40 : 0.0025) : 15.0;
+      const rawNearestRes = recentHighs[0] || currentPrice + defaultSrDist;
+      const rawNearestSup = recentLows[0] || currentPrice - defaultSrDist;
+
+      const nearestResistance = (rawNearestRes > currentPrice && rawNearestRes < currentPrice * 1.25)
+        ? Number(rawNearestRes.toFixed(digits))
+        : Number((currentPrice + defaultSrDist).toFixed(digits));
+      const nearestSupport = (rawNearestSup < currentPrice && rawNearestSup > currentPrice * 0.75)
+        ? Number(rawNearestSup.toFixed(digits))
+        : Number((currentPrice - defaultSrDist).toFixed(digits));
+
+      const secondaryResistance = Number((nearestResistance + defaultSrDist * 0.8).toFixed(digits));
+      const secondarySupport = Number((nearestSupport - defaultSrDist * 0.8).toFixed(digits));
+
       srResult = {
         nearestSupport,
         secondarySupport,
         nearestResistance,
         secondaryResistance,
-        distToNearestSupport: Number(Math.abs(currentPrice - nearestSupport).toFixed(2)),
-        distToNearestResistance: Number(Math.abs(nearestResistance - currentPrice).toFixed(2)),
+        distToNearestSupport: Number(Math.abs(currentPrice - nearestSupport).toFixed(digits)),
+        distToNearestResistance: Number(Math.abs(nearestResistance - currentPrice).toFixed(digits)),
       };
     }
 
     // 10. Swing Structure
     let swingResult = undefined;
     if (isInc('SWING')) {
-      const latestSwingHigh = Number((Math.max(...highs.slice(-15)) || currentPrice + 18).toFixed(2));
-      const latestSwingLow = Number((Math.min(...lows.slice(-15)) || currentPrice - 18).toFixed(2));
+      const defaultSwingOffset = isCrypto ? 450.0 : isForex ? (digits === 3 ? 0.50 : 0.0035) : 18.0;
+      const rawSwingHigh = Math.max(...highs.slice(-15));
+      const rawSwingLow = Math.min(...lows.slice(-15));
+
+      const latestSwingHigh = (rawSwingHigh > currentPrice && rawSwingHigh < currentPrice * 1.3)
+        ? Number(rawSwingHigh.toFixed(digits))
+        : Number((currentPrice + defaultSwingOffset).toFixed(digits));
+      const latestSwingLow = (rawSwingLow < currentPrice && rawSwingLow > currentPrice * 0.7)
+        ? Number(rawSwingLow.toFixed(digits))
+        : Number((currentPrice - defaultSwingOffset).toFixed(digits));
+
       const isBullStructure = currentPrice > calculateEma(50) && latestSwingHigh > (highs[highs.length - 20] || currentPrice);
       const isBearStructure = currentPrice < calculateEma(50) && latestSwingLow < (lows[lows.length - 20] || currentPrice);
       const marketStructure = isBullStructure ? 'BULLISH' : isBearStructure ? 'BEARISH' : 'RANGE';
@@ -513,44 +539,54 @@ export class TechnicalEngine {
     // 11. Fibonacci
     let fibResult = undefined;
     if (isInc('FIBONACCI')) {
-      const lSwingHigh = Number((Math.max(...highs.slice(-15)) || currentPrice + 18).toFixed(2));
-      const lSwingLow = Number((Math.min(...lows.slice(-15)) || currentPrice - 18).toFixed(2));
-      const swingRange = lSwingHigh - lSwingLow || 30;
+      const defaultSwingOffset = isCrypto ? 450.0 : isForex ? (digits === 3 ? 0.50 : 0.0035) : 18.0;
+      const lSwingHigh = (Math.max(...highs.slice(-15)) > currentPrice)
+        ? Math.max(...highs.slice(-15))
+        : currentPrice + defaultSwingOffset;
+      const lSwingLow = (Math.min(...lows.slice(-15)) < currentPrice)
+        ? Math.min(...lows.slice(-15))
+        : currentPrice - defaultSwingOffset;
+      const swingRange = Math.max(lSwingHigh - lSwingLow, defaultSwingOffset * 0.5);
       fibResult = {
-        fib236: Number((lSwingHigh - swingRange * 0.236).toFixed(2)),
-        fib382: Number((lSwingHigh - swingRange * 0.382).toFixed(2)),
-        fib500: Number((lSwingHigh - swingRange * 0.500).toFixed(2)),
-        fib618: Number((lSwingHigh - swingRange * 0.618).toFixed(2)),
-        fib786: Number((lSwingHigh - swingRange * 0.786).toFixed(2)),
-        ext1272: Number((lSwingHigh + swingRange * 0.272).toFixed(2)),
-        ext1618: Number((lSwingHigh + swingRange * 0.618).toFixed(2)),
+        fib236: Number((lSwingHigh - swingRange * 0.236).toFixed(digits)),
+        fib382: Number((lSwingHigh - swingRange * 0.382).toFixed(digits)),
+        fib500: Number((lSwingHigh - swingRange * 0.500).toFixed(digits)),
+        fib618: Number((lSwingHigh - swingRange * 0.618).toFixed(digits)),
+        fib786: Number((lSwingHigh - swingRange * 0.786).toFixed(digits)),
+        ext1272: Number((lSwingHigh + swingRange * 0.272).toFixed(digits)),
+        ext1618: Number((lSwingHigh + swingRange * 0.618).toFixed(digits)),
       };
     }
 
     // 12. Pivot Points classic
     let pivotResult = undefined;
     if (isInc('PIVOT')) {
+      const defaultD1Range = isCrypto ? 800.0 : isForex ? (digits === 3 ? 0.80 : 0.0060) : 14.0;
       const lastD1Candle = candlesD1[candlesD1.length - 1] || {
-        high: currentPrice + 14,
-        low: currentPrice - 14,
+        high: currentPrice + defaultD1Range,
+        low: currentPrice - defaultD1Range,
         close: currentPrice,
       };
-      const P = (lastD1Candle.high + lastD1Candle.low + lastD1Candle.close) / 3;
-      const R1 = 2 * P - lastD1Candle.low;
-      const S1 = 2 * P - lastD1Candle.high;
-      const R2 = P + (lastD1Candle.high - lastD1Candle.low);
-      const S2 = P - (lastD1Candle.high - lastD1Candle.low);
-      const R3 = lastD1Candle.high + 2 * (P - lastD1Candle.low);
-      const S3 = lastD1Candle.low - 2 * (lastD1Candle.high - P);
+      const d1High = (lastD1Candle.high > currentPrice * 0.5 && lastD1Candle.high < currentPrice * 1.5) ? lastD1Candle.high : currentPrice + defaultD1Range;
+      const d1Low = (lastD1Candle.low > currentPrice * 0.5 && lastD1Candle.low < currentPrice * 1.5) ? lastD1Candle.low : currentPrice - defaultD1Range;
+      const d1Close = (lastD1Candle.close > currentPrice * 0.5 && lastD1Candle.close < currentPrice * 1.5) ? lastD1Candle.close : currentPrice;
+
+      const P = (d1High + d1Low + d1Close) / 3;
+      const R1 = 2 * P - d1Low;
+      const S1 = 2 * P - d1High;
+      const R2 = P + (d1High - d1Low);
+      const S2 = P - (d1High - d1Low);
+      const R3 = d1High + 2 * (P - d1Low);
+      const S3 = d1Low - 2 * (d1High - P);
 
       pivotResult = {
-        pivot: Number(P.toFixed(2)),
-        r1: Number(R1.toFixed(2)),
-        r2: Number(R2.toFixed(2)),
-        r3: Number(R3.toFixed(2)),
-        s1: Number(S1.toFixed(2)),
-        s2: Number(S2.toFixed(2)),
-        s3: Number(S3.toFixed(2)),
+        pivot: Number(P.toFixed(digits)),
+        r1: Number(R1.toFixed(digits)),
+        r2: Number(R2.toFixed(digits)),
+        r3: Number(R3.toFixed(digits)),
+        s1: Number(S1.toFixed(digits)),
+        s2: Number(S2.toFixed(digits)),
+        s3: Number(S3.toFixed(digits)),
       };
     }
 

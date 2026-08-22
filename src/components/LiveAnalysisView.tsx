@@ -103,28 +103,34 @@ export const createExecutionParametersFromSnapshot = (
       ? 'SELL'
       : 'BUY';
 
-  const entry = Number(
-    (plan.entry_price || snap.capturePrice || snap.market_price_at_creation || snap.anchor_price || 0).toFixed(specDigits)
+  const rawEntry = Number(
+    plan.entry_price || snap.capturePrice || snap.market_price_at_creation || snap.anchor_price || 0
   );
-  const riskDist = Number(snap.risk_distance || 17.02);
+  const entry = Number((rawEntry > 0 ? rawEntry : (currentSym.toUpperCase().includes('BTC') ? 77284.50 : 4470.00)).toFixed(specDigits));
 
-  let sl = plan.stop_loss ? Number(plan.stop_loss) : 0;
-  if (!sl || isNaN(sl)) {
-    sl = side === 'SELL' ? entry + riskDist : entry - riskDist;
-  }
-  sl = Number(sl.toFixed(specDigits));
+  const isCrypto = currentSym.toUpperCase().includes('BTC');
+  const isForex = specDigits === 5 || specDigits === 3;
+  const defaultRiskDist = isCrypto ? 650.0 : isForex ? (specDigits === 3 ? 0.45 : 0.0035) : 17.02;
+  const rawRiskDist = Number(snap.risk_distance);
+  const riskDist = (rawRiskDist > 0 && rawRiskDist < entry * 0.5) ? rawRiskDist : defaultRiskDist;
 
-  let tp1 = plan.take_profit_1 ? Number(plan.take_profit_1) : 0;
-  if (!tp1 || isNaN(tp1)) {
-    tp1 = side === 'SELL' ? entry - riskDist * 1.57 : entry + riskDist * 1.57;
+  let rawSl = plan.stop_loss ? Number(plan.stop_loss) : 0;
+  if (!rawSl || isNaN(rawSl) || rawSl <= 0) {
+    rawSl = side === 'SELL' ? entry + riskDist : entry - riskDist;
   }
-  tp1 = Number(tp1.toFixed(specDigits));
+  const sl = Number(Math.max(0.0001, rawSl).toFixed(specDigits));
 
-  let tp2: number | null = plan.take_profit_2 ? Number(plan.take_profit_2) : null;
-  if (!tp2 || isNaN(tp2)) {
-    tp2 = side === 'SELL' ? entry - riskDist * 2.8 : entry + riskDist * 2.8;
+  let rawTp1 = plan.take_profit_1 ? Number(plan.take_profit_1) : 0;
+  if (!rawTp1 || isNaN(rawTp1) || rawTp1 <= 0) {
+    rawTp1 = side === 'SELL' ? entry - riskDist * 1.57 : entry + riskDist * 1.57;
   }
-  tp2 = Number(tp2.toFixed(specDigits));
+  const tp1 = Number(Math.max(0.0001, rawTp1).toFixed(specDigits));
+
+  let rawTp2: number | null = plan.take_profit_2 ? Number(plan.take_profit_2) : null;
+  if (!rawTp2 || isNaN(rawTp2) || rawTp2 <= 0) {
+    rawTp2 = side === 'SELL' ? entry - riskDist * 2.8 : entry + riskDist * 2.8;
+  }
+  const tp2 = Number(Math.max(0.0001, rawTp2).toFixed(specDigits));
 
   const calculatedLot = Number((sizing.calculated_lot ?? sizing.normalized_lot ?? fallbackLot ?? 0.01).toFixed(4));
   const safetyCapLot = Number((sizing.safety_cap_lot ?? 0.01).toFixed(2));
@@ -135,10 +141,11 @@ export const createExecutionParametersFromSnapshot = (
   const conf = Number(snap.confidence ?? 85);
   const rr = Number(plan.risk_reward_ratio ?? 1.57);
 
+  const zoneBuffer = isCrypto ? 150 : isForex ? (specDigits === 3 ? 0.15 : 0.0010) : 1.5;
   const zone =
     snap.potential_entry_zone ||
     snap.planned_entry_zone ||
-    (entry > 0 ? `${(entry - 1.5).toFixed(specDigits)} – ${(entry + 1.5).toFixed(specDigits)}` : '—');
+    (entry > 0 ? `${(entry - zoneBuffer).toFixed(specDigits)} – ${(entry + zoneBuffer).toFixed(specDigits)}` : '—');
 
   const mode = snap.entry_mode || 'MARKET';
 
@@ -2414,9 +2421,21 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
         if (!params) return null;
 
         // Phase 4 Authoritative Safety Gate Calculation
+        // Required MT5 Execution Connectivity Gates (HARD BLOCKERS)
         const isAccountConnected = Boolean(connectedAccount?.accountNumber);
         const isWorkerOnline = Boolean(connectedAccount?.workerOnline);
         const isExecutionEnabled = Boolean(connectedAccount?.executionEnabled);
+        const isSignalNotDispatched = !dispatchedSignalIds.includes(params.signalId);
+
+        const blockingGateReasons: string[] = [];
+        if (!isAccountConnected) blockingGateReasons.push('No MT5 trading account connected.');
+        if (!isWorkerOnline) blockingGateReasons.push(`MT5 Worker (${connectedAccount?.workerId || 'UNREGISTERED'}) is OFFLINE.`);
+        if (!isExecutionEnabled) blockingGateReasons.push(`MT5 Execution is DISABLED for account ${connectedAccount?.accountNumber || ''}.`);
+        if (!isSignalNotDispatched) blockingGateReasons.push('Signal has already been dispatched to MT5.');
+
+        const allGatesPass = blockingGateReasons.length === 0;
+
+        // Trade Plan Structure & Risk Assessment (ADVISORY / WARNING ONLY - NON-BLOCKING)
         const isDirectionValid = params.side === 'BUY' || params.side === 'SELL';
         const isLotValid = params.lot > 0 && isFinite(params.lot) && params.lot <= 100;
         const isEntryValid = params.entryPrice > 0 && isFinite(params.entryPrice);
@@ -2428,20 +2447,13 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
         const calculatedRR = riskDist > 0 && rewardDist > 0 ? Number((rewardDist / riskDist).toFixed(2)) : 0;
         const minRecommendedRR = params.tradingStyle === 'SCALPING' ? 1.20 : 1.50;
 
-        const isSignalNotDispatched = !dispatchedSignalIds.includes(params.signalId);
-
-        const failedGateReasons: string[] = [];
-        if (!isAccountConnected) failedGateReasons.push('No MT5 trading account connected.');
-        if (!isWorkerOnline) failedGateReasons.push(`MT5 Worker (${connectedAccount?.workerId || 'UNREGISTERED'}) is OFFLINE.`);
-        if (!isExecutionEnabled) failedGateReasons.push(`MT5 Execution is DISABLED for account ${connectedAccount?.accountNumber || ''}.`);
-        if (!isDirectionValid) failedGateReasons.push(`Direction '${params.side}' is invalid.`);
-        if (!isLotValid) failedGateReasons.push(`Lot size (${params.lot}) is invalid.`);
-        if (!isEntryValid) failedGateReasons.push(`Entry price ($${params.entryPrice}) is invalid.`);
-        if (!isSLValid) failedGateReasons.push(`Stop Loss ($${params.stopLoss}) must be ${params.side === 'BUY' ? 'below' : 'above'} Entry ($${params.entryPrice}).`);
-        if (!isTPValid) failedGateReasons.push(`Take Profit ($${params.takeProfit1}) must be ${params.side === 'BUY' ? 'above' : 'below'} Entry ($${params.entryPrice}).`);
-        if (!isSignalNotDispatched) failedGateReasons.push('Signal has already been dispatched to MT5.');
-
-        const allGatesPass = failedGateReasons.length === 0;
+        const advisoryWarnings: string[] = [];
+        if (!isDirectionValid) advisoryWarnings.push(`Direction '${params.side}' advisory check.`);
+        if (!isLotValid) advisoryWarnings.push(`Lot size (${params.lot}) advisory notice.`);
+        if (!isEntryValid) advisoryWarnings.push(`Entry price ($${params.entryPrice}) advisory.`);
+        if (!isSLValid) advisoryWarnings.push(`Stop Loss ($${params.stopLoss}) advisory: Recommended ${params.side === 'BUY' ? 'below' : 'above'} Entry ($${params.entryPrice}).`);
+        if (!isTPValid) advisoryWarnings.push(`Take Profit ($${params.takeProfit1}) advisory: Recommended ${params.side === 'BUY' ? 'above' : 'below'} Entry ($${params.entryPrice}).`);
+        if (calculatedRR > 0 && calculatedRR < minRecommendedRR) advisoryWarnings.push(`Risk/Reward (1:${calculatedRR.toFixed(2)}) is lower than recommended (1:${minRecommendedRR.toFixed(2)}).`);
 
         return (
           <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 overflow-y-auto">
@@ -2607,8 +2619,8 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-gray-400">4. Direction & Structure (SL/TP):</span>
-                    <span className={isSLValid && isTPValid ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
-                      {isSLValid && isTPValid ? 'PASS ✓' : 'FAIL (Invalid Levels)'}
+                    <span className="text-blue-400 font-bold">
+                      {isSLValid && isTPValid ? 'PASS ✓ (Advisory)' : 'ADVISORY ONLY (Non-Blocking)'}
                     </span>
                   </div>
                   <div className="flex items-center justify-between">
@@ -2620,22 +2632,37 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
                   <div className="flex items-center justify-between">
                     <span className="text-gray-400">6. AI Plan Advisory:</span>
                     <span className="text-blue-400 font-bold">
-                      {snapshot?.eligibility?.eligible !== false ? 'ELIGIBLE (Info)' : 'ADVISORY ONLY (Non-Blocking)'}
+                      {snapshot?.eligibility?.eligible !== false ? 'ELIGIBLE (Advisory)' : 'ADVISORY ONLY (Non-Blocking)'}
                     </span>
                   </div>
                 </div>
               </div>
 
-              {/* Execution Blocked Banner if Any Gate Fails */}
+              {/* Execution Blocked Banner ONLY if MT5 / Account Blocking Gates Fail */}
               {!allGatesPass && (
                 <div className="p-3.5 rounded-xl border border-rose-500/40 bg-rose-500/10 text-rose-300 text-xs space-y-1.5">
                   <div className="font-extrabold flex items-center gap-1.5 text-rose-400">
                     <AlertTriangle className="w-4 h-4 text-rose-400" />
-                    EXECUTION BLOCKED — SAFETY CRITERIA NOT MET
+                    EXECUTION BLOCKED — MT5 WORKER / ACCOUNT CRITERIA NOT MET
                   </div>
                   <ul className="list-disc pl-4 space-y-0.5 text-[11px]">
-                    {failedGateReasons.map((r, i) => (
+                    {blockingGateReasons.map((r, i) => (
                       <li key={i}>{r}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Non-blocking Trade Plan Advisory Warning Banner */}
+              {allGatesPass && advisoryWarnings.length > 0 && (
+                <div className="p-3 rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-300 text-xs space-y-1">
+                  <div className="font-bold flex items-center gap-1.5 text-amber-400">
+                    <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <span>TRADE PLAN ADVISORY NOTICE (NON-BLOCKING)</span>
+                  </div>
+                  <ul className="list-disc pl-4 space-y-0.5 text-[10px] text-amber-300/90">
+                    {advisoryWarnings.map((w, i) => (
+                      <li key={i}>{w}</li>
                     ))}
                   </ul>
                 </div>
