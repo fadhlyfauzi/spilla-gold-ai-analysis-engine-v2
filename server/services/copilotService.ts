@@ -29,7 +29,7 @@ import { tradeValidationEngine } from '../engines/tradeValidationEngine.js';
 import { db } from '../db/database.js';
 
 export class CopilotService {
-  private activeSnapshot: CopilotTradePlanSnapshot | null = null;
+  private activeSnapshots: Map<string, CopilotTradePlanSnapshot> = new Map();
   private processedIdempotencyKeys: Map<string, CopilotExecutionResponse> = new Map();
 
   private getGenAI(): GoogleGenAI | null {
@@ -45,84 +45,104 @@ export class CopilotService {
     });
   }
 
-  public getActiveSnapshot(): CopilotTradePlanSnapshot | null {
-    if (!this.activeSnapshot) {
-      this.activeSnapshot = db.getActiveTradePlanSnapshot();
-    }
-    if (!this.activeSnapshot) return null;
+  public getActiveSnapshot(symbol?: string): CopilotTradePlanSnapshot | null {
+    const resolved = symbolService.resolveSymbol(symbol || 'XAUUSD');
+    const sym = resolved.canonicalSymbol;
 
-    const liveMarketState = marketDataService.getLiveMarketState();
+    let snapshot = this.activeSnapshots.get(sym);
+    if (!snapshot) {
+      snapshot = db.getActiveTradePlanSnapshot(sym);
+      if (snapshot) {
+        this.activeSnapshots.set(sym, snapshot);
+      }
+    }
+    if (!snapshot) return null;
+
+    const liveMarketState = marketDataService.getLiveMarketState(sym);
     const livePrice = liveMarketState.midPrice;
 
     // Calculate real-time drift between running MT5 live market price and the captured plan anchor
-    const anchorPrice = this.activeSnapshot.capturePrice ?? this.activeSnapshot.trade_plan?.entry_price ?? this.activeSnapshot.market_price_at_creation;
-    const drift = anchorPrice > 0 && livePrice > 0 ? Number(Math.abs(livePrice - anchorPrice).toFixed(2)) : 0;
+    const anchorPrice = snapshot.capturePrice ?? snapshot.trade_plan?.entry_price ?? snapshot.market_price_at_creation;
+    const drift = anchorPrice > 0 && livePrice > 0 ? Number(Math.abs(livePrice - anchorPrice).toFixed(snapshot.symbol_spec?.digits || 2)) : 0;
     
-    this.activeSnapshot.price_drift = drift;
-    this.activeSnapshot.marketTimestamp = liveMarketState.isoTimestamp;
+    snapshot.price_drift = drift;
+    snapshot.marketTimestamp = liveMarketState.isoTimestamp;
 
     if (
-      this.activeSnapshot.status === 'EXECUTED' ||
-      this.activeSnapshot.plan_mode === 'LOCKED' ||
-      this.activeSnapshot.status === 'LOCKED'
+      snapshot.status === 'EXECUTED' ||
+      snapshot.plan_mode === 'LOCKED' ||
+      snapshot.status === 'LOCKED'
     ) {
-      this.activeSnapshot.plan_mode = 'LOCKED';
+      snapshot.plan_mode = 'LOCKED';
     } else {
-      this.activeSnapshot.plan_mode = 'DYNAMIC';
-      if (this.activeSnapshot.status !== 'APPROVED' && this.activeSnapshot.status !== 'REJECTED') {
-        this.activeSnapshot.status = 'DYNAMIC';
+      snapshot.plan_mode = 'DYNAMIC';
+      if (snapshot.status !== 'APPROVED' && snapshot.status !== 'REJECTED') {
+        snapshot.status = 'DYNAMIC';
       }
     }
 
-    return this.activeSnapshot;
+    return snapshot;
   }
 
-  public lockActiveTradePlan(lockedPrice?: number): CopilotTradePlanSnapshot | null {
-    if (!this.activeSnapshot) return null;
-    const price = lockedPrice || this.activeSnapshot.capturePrice || marketDataService.getCurrentPrice();
-    const action = this.activeSnapshot.action === 'SELL' ? 'SELL' : this.activeSnapshot.action === 'BUY' ? 'BUY' : 'NONE';
+  public lockActiveTradePlan(symbol?: string, lockedPrice?: number): CopilotTradePlanSnapshot | null {
+    const resolved = symbolService.resolveSymbol(symbol || 'XAUUSD');
+    const sym = resolved.canonicalSymbol;
+    const activeSnapshot = this.getActiveSnapshot(sym);
+    if (!activeSnapshot) return null;
+
+    const price = lockedPrice || activeSnapshot.capturePrice || marketDataService.getCurrentPrice(sym);
+    const action = activeSnapshot.action === 'SELL' ? 'SELL' : activeSnapshot.action === 'BUY' ? 'BUY' : 'NONE';
     const dynamicLevels = marketDataService.calculateDynamicExecutionLevels(
       price,
       action,
-      this.activeSnapshot.risk_distance || 17.02,
+      activeSnapshot.risk_distance || 17.02,
       1.57,
-      this.activeSnapshot.symbol_spec?.digits || 2
+      activeSnapshot.symbol_spec?.digits || 2,
+      sym
     );
 
-    this.activeSnapshot.plan_mode = 'LOCKED';
-    this.activeSnapshot.status = 'LOCKED';
-    this.activeSnapshot.market_price_at_creation = dynamicLevels.entry_price;
-    this.activeSnapshot.anchor_price = dynamicLevels.entry_price;
-    this.activeSnapshot.liveAnchorPrice = dynamicLevels.entry_price;
-    this.activeSnapshot.capturePrice = dynamicLevels.entry_price;
-    this.activeSnapshot.plannedEntry = dynamicLevels.entry_price;
-    this.activeSnapshot.trade_plan.entry_price = dynamicLevels.entry_price;
-    this.activeSnapshot.trade_plan.planned_entry = dynamicLevels.entry_price;
-    this.activeSnapshot.trade_plan.stop_loss = dynamicLevels.stop_loss;
-    this.activeSnapshot.trade_plan.take_profit_1 = dynamicLevels.take_profit_1;
-    this.activeSnapshot.trade_plan.take_profit_2 = dynamicLevels.take_profit_2;
-    this.activeSnapshot.trade_plan.take_profit_3 = dynamicLevels.take_profit_3;
-    this.activeSnapshot.tradePlanTimestamp = new Date().toISOString();
+    activeSnapshot.plan_mode = 'LOCKED';
+    activeSnapshot.status = 'LOCKED';
+    activeSnapshot.market_price_at_creation = dynamicLevels.entry_price;
+    activeSnapshot.anchor_price = dynamicLevels.entry_price;
+    activeSnapshot.liveAnchorPrice = dynamicLevels.entry_price;
+    activeSnapshot.capturePrice = dynamicLevels.entry_price;
+    activeSnapshot.plannedEntry = dynamicLevels.entry_price;
+    activeSnapshot.trade_plan.entry_price = dynamicLevels.entry_price;
+    activeSnapshot.trade_plan.planned_entry = dynamicLevels.entry_price;
+    activeSnapshot.trade_plan.stop_loss = dynamicLevels.stop_loss;
+    activeSnapshot.trade_plan.take_profit_1 = dynamicLevels.take_profit_1;
+    activeSnapshot.trade_plan.take_profit_2 = dynamicLevels.take_profit_2;
+    activeSnapshot.trade_plan.take_profit_3 = dynamicLevels.take_profit_3;
+    activeSnapshot.tradePlanTimestamp = new Date().toISOString();
 
-    db.setActiveTradePlanSnapshot(this.activeSnapshot);
-    console.log(`[SPILLA][PLAN LOCKED] Plan ${this.activeSnapshot.trade_plan_id} locked at entry $${dynamicLevels.entry_price}`);
-    return this.activeSnapshot;
+    this.activeSnapshots.set(sym, activeSnapshot);
+    db.setActiveTradePlanSnapshot(activeSnapshot);
+    console.log(`[SPILLA][PLAN LOCKED] Plan ${activeSnapshot.trade_plan_id} for ${sym} locked at entry ${dynamicLevels.entry_price}`);
+    return activeSnapshot;
   }
 
-  public unlockActiveTradePlan(): CopilotTradePlanSnapshot | null {
-    if (!this.activeSnapshot) return null;
-    this.activeSnapshot.plan_mode = 'DYNAMIC';
-    this.activeSnapshot.status = 'DYNAMIC';
-    this.activeSnapshot.actual_execution_price = undefined;
-    this.activeSnapshot.actualEntry = undefined;
-    db.setActiveTradePlanSnapshot(this.activeSnapshot);
-    console.log(`[SPILLA][PLAN UNLOCKED] Plan ${this.activeSnapshot.trade_plan_id} returned to DYNAMIC LIVE mode`);
-    return this.activeSnapshot;
+  public unlockActiveTradePlan(symbol?: string): CopilotTradePlanSnapshot | null {
+    const resolved = symbolService.resolveSymbol(symbol || 'XAUUSD');
+    const sym = resolved.canonicalSymbol;
+    const activeSnapshot = this.getActiveSnapshot(sym);
+    if (!activeSnapshot) return null;
+
+    activeSnapshot.plan_mode = 'DYNAMIC';
+    activeSnapshot.status = 'DYNAMIC';
+    activeSnapshot.actual_execution_price = undefined;
+    activeSnapshot.actualEntry = undefined;
+    this.activeSnapshots.set(sym, activeSnapshot);
+    db.setActiveTradePlanSnapshot(activeSnapshot);
+    console.log(`[SPILLA][PLAN UNLOCKED] Plan ${activeSnapshot.trade_plan_id} for ${sym} returned to DYNAMIC LIVE mode`);
+    return activeSnapshot;
   }
 
-  public onLivePriceUpdate(newPrice: number): void {
-    if (this.activeSnapshot && this.activeSnapshot.plan_mode !== 'LOCKED' && this.activeSnapshot.status !== 'EXECUTED') {
-      this.getActiveSnapshot();
+  public onLivePriceUpdate(newPrice: number, symbol?: string): void {
+    const sym = symbol ? symbolService.resolveSymbol(symbol).canonicalSymbol : 'XAUUSD';
+    const snapshot = this.activeSnapshots.get(sym);
+    if (snapshot && snapshot.plan_mode !== 'LOCKED' && snapshot.status !== 'EXECUTED') {
+      this.getActiveSnapshot(sym);
     }
   }
 
@@ -396,7 +416,7 @@ export class CopilotService {
       },
     };
 
-    this.activeSnapshot = snapshot;
+    this.activeSnapshots.set(symbolService.resolveSymbol(symbol).canonicalSymbol, snapshot);
     db.setActiveTradePlanSnapshot(snapshot);
 
     // 7. Synchronize into database SSOT Active Signal
@@ -1494,7 +1514,8 @@ Return strictly JSON matching this structure:
     }
 
     // 3. Retrieve Trade Plan Snapshot
-    const activePlan = this.activeSnapshot;
+    const sym = symbolService.resolveSymbol(req.symbol || 'XAUUSD').canonicalSymbol;
+    const activePlan = this.getActiveSnapshot(sym);
     if (!activePlan || (req.trade_plan_id && activePlan.trade_plan_id !== req.trade_plan_id)) {
       return {
         success: false,
@@ -1506,7 +1527,7 @@ Return strictly JSON matching this structure:
     }
 
     // 4. Final Live Validation Before Sending to Broker
-    const liveMarket = marketDataService.getLiveMarket();
+    const liveMarket = marketDataService.getLiveMarket(sym);
     const liveCheck = this.validateBeforeExecution(activePlan, liveMarket, req.action);
 
     if (!liveCheck.valid) {

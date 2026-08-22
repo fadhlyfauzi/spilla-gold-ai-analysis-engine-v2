@@ -120,12 +120,13 @@ function generateDefaultBase64ChartImage(symbol = 'XAUUSD.cent', price?: number)
 
 class SnapshotService {
   private latestSnapshot: ChartSnapshot | null = null;
+  private snapshotsBySymbol: Map<string, ChartSnapshot> = new Map();
   private lastMultimodalAnalysis: MultimodalAnalysisResult | null = null;
   private signalHistoryLog: SignalHistoryEntry[] = [];
 
   constructor() {
     const now = new Date();
-    const livePrice = marketDataService.getCurrentPrice();
+    const livePrice = marketDataService.getCurrentPrice('XAUUSD');
     this.latestSnapshot = {
       id: 'snap-init-1',
       imageDataUrl: generateDefaultBase64ChartImage('XAUUSD.cent', livePrice),
@@ -135,6 +136,7 @@ class SnapshotService {
       timeframe: 'H1',
       currentPrice: livePrice,
     };
+    this.snapshotsBySymbol.set('XAUUSD', this.latestSnapshot);
 
     this.seedInitialHistory();
   }
@@ -210,14 +212,19 @@ class SnapshotService {
     };
 
     this.latestSnapshot = newSnapshot;
+    this.snapshotsBySymbol.set(resolved.canonicalSymbol, newSnapshot);
     return newSnapshot;
   }
 
-  public getLatestSnapshot(): ChartSnapshot | null {
+  public getLatestSnapshot(symbol?: string): ChartSnapshot | null {
+    if (symbol) {
+      const canonical = symbolService.resolveSymbol(symbol).canonicalSymbol;
+      return this.snapshotsBySymbol.get(canonical) || null;
+    }
     return this.latestSnapshot;
   }
 
-  public getSignalHistory(): SignalHistoryEntry[] {
+  public getSignalHistory(symbol?: string): SignalHistoryEntry[] {
     return this.signalHistoryLog;
   }
 

@@ -33,6 +33,7 @@ eaRouter.post(['/', '/mt5-data', '/payload', '/tick', '/ingest'], async (req, re
       });
 
       console.log("[MT5 → MARKET DATA]", {
+        symbol: rawSymbol,
         bid: rawBid,
         ask: rawAsk,
         mid: rawPrice,
@@ -41,13 +42,13 @@ eaRouter.post(['/', '/mt5-data', '/payload', '/tick', '/ingest'], async (req, re
         isLive: true
       });
 
-      console.log("[MARKET DATA AFTER MT5 UPDATE]", marketDataService.getLiveMarketState());
+      console.log("[MARKET DATA AFTER MT5 UPDATE]", marketDataService.getLiveMarketState(rawSymbol));
 
-      copilotService.onLivePriceUpdate(rawPrice);
+      copilotService.onLivePriceUpdate(rawPrice, rawSymbol);
     }
 
     const result = await mt5AiService.processMt5Payload(payload);
-    const activePlan = copilotService.getActiveSnapshot();
+    const activePlan = copilotService.getActiveSnapshot(rawSymbol);
 
     res.json({
       success: true,
@@ -55,7 +56,7 @@ eaRouter.post(['/', '/mt5-data', '/payload', '/tick', '/ingest'], async (req, re
       mt5Data: result.mt5Data,
       analysis: result.analysis,
       activePlan,
-      activeSignal: db.getActiveSignal(),
+      activeSignal: db.getActiveSignal(rawSymbol),
     });
   } catch (error: any) {
     console.error('[EA Route Error] Failed to process MT5 payload:', error);
@@ -71,8 +72,9 @@ eaRouter.post(['/', '/mt5-data', '/payload', '/tick', '/ingest'], async (req, re
  * GET /api/ea/mt5-data or /api/mt5-data
  * Get latest MT5 payload, active trade plan, and Google AI Studio Gemini analysis result.
  */
-eaRouter.get(['/', '/mt5-data'], async (_req, res) => {
+eaRouter.get(['/', '/mt5-data'], async (req, res) => {
   try {
+    const reqSym = (req.query.symbol as string) || 'XAUUSD';
     const mt5Data = mt5AiService.getLatestMt5Data();
     let analysis = mt5AiService.getLatestAnalysis();
 
@@ -81,14 +83,14 @@ eaRouter.get(['/', '/mt5-data'], async (_req, res) => {
       analysis = processed.analysis;
     }
 
-    const activePlan = copilotService.getActiveSnapshot();
+    const activePlan = copilotService.getActiveSnapshot(reqSym);
 
     res.json({
       success: true,
       mt5Data,
       analysis,
       activePlan,
-      activeSignal: db.getActiveSignal(),
+      activeSignal: db.getActiveSignal(reqSym),
     });
   } catch (error: any) {
     console.error('[EA Route Error] Failed to retrieve MT5 data:', error);
@@ -107,6 +109,7 @@ eaRouter.get(['/', '/mt5-data'], async (_req, res) => {
 eaRouter.post(['/trade-update', '/execution-status'], (req, res) => {
   try {
     const {
+      symbol,
       planId,
       trade_plan_id,
       snapshotId,
@@ -129,8 +132,9 @@ eaRouter.post(['/trade-update', '/execution-status'], (req, res) => {
       returnPips,
     } = req.body || {};
 
-    const activeSig = db.getActiveSignal();
-    const activePlan = copilotService.getActiveSnapshot();
+    const reqSym = symbol || 'XAUUSD';
+    const activeSig = db.getActiveSignal(reqSym);
+    const activePlan = copilotService.getActiveSnapshot(reqSym);
     const targetSignalId = signalId || activeSig?.signalId || '';
     const targetPlanId = planId || trade_plan_id || activePlan?.trade_plan_id || '';
     const targetSnapshotId = snapshotId || snapshot_id || activePlan?.snapshot_id || '';
@@ -140,7 +144,7 @@ eaRouter.post(['/trade-update', '/execution-status'], (req, res) => {
     const actPrice = actualExecutionPrice !== undefined ? Number(actualExecutionPrice) : (actualEntry !== undefined ? Number(actualEntry) : (actualPrice !== undefined ? Number(actualPrice) : (fillPrice !== undefined ? Number(fillPrice) : undefined)));
 
     console.log(
-      `\n[SPILLA][EXECUTION]\nPlan ID: ${targetPlanId}\nSnapshot ID: ${targetSnapshotId}\nPlanned Entry: ${planEntryVal}\nActual Entry: ${actPrice ?? '--'}\nStatus: ${status || executionStatus || 'EXECUTED'}\n`
+      `\n[SPILLA][EXECUTION]\nSymbol: ${reqSym}\nPlan ID: ${targetPlanId}\nSnapshot ID: ${targetSnapshotId}\nPlanned Entry: ${planEntryVal}\nActual Entry: ${actPrice ?? '--'}\nStatus: ${status || executionStatus || 'EXECUTED'}\n`
     );
 
     const updated = db.updateSignalExecution(targetSignalId, {
@@ -152,6 +156,7 @@ eaRouter.post(['/trade-update', '/execution-status'], (req, res) => {
       executedAt: executedAt || new Date().toISOString(),
       closedResult,
       returnPips,
+      symbol: reqSym,
     });
 
     if (activePlan && actPrice !== undefined) {
@@ -168,7 +173,7 @@ eaRouter.post(['/trade-update', '/execution-status'], (req, res) => {
       snapshotId: targetSnapshotId,
       plannedEntry: planEntryVal,
       actualEntry: actPrice,
-      signal: updated || db.getActiveSignal(),
+      signal: updated || db.getActiveSignal(reqSym),
       activePlan,
     });
   } catch (error: any) {
@@ -188,17 +193,17 @@ eaRouter.post(['/trade-update', '/execution-status'], (req, res) => {
  */
 eaRouter.get('/signal', async (req, res) => {
   try {
-    const symbolParam = req.query.symbol as string;
-    let activePlan = copilotService.getActiveSnapshot();
+    const symbolParam = (req.query.symbol as string) || 'XAUUSD';
+    let activePlan = copilotService.getActiveSnapshot(symbolParam);
 
     if (!activePlan) {
       // Auto-generate fresh plan if none active
-      activePlan = await copilotService.captureAndAnalyze();
+      activePlan = await copilotService.captureAndAnalyze({ symbol: symbolParam });
     }
 
-    const currentLivePrice = marketDataService.getCurrentPrice();
-    const liveMarket = marketDataService.getLiveMarket();
-    const activeSig = db.getActiveSignal();
+    const currentLivePrice = marketDataService.getCurrentPrice(symbolParam);
+    const liveMarket = marketDataService.getLiveMarket(symbolParam);
+    const activeSig = db.getActiveSignal(symbolParam);
 
     const symbol = symbolParam ? symbolParam.trim() : (activePlan?.symbol || 'XAUUSD');
     const planId = activePlan.trade_plan_id;
@@ -207,7 +212,7 @@ eaRouter.get('/signal', async (req, res) => {
     const stopLoss = activePlan.trade_plan.stop_loss;
     const takeProfit1 = activePlan.trade_plan.take_profit_1;
     const takeProfit2 = activePlan.trade_plan.take_profit_2;
-    const takeProfit3 = activePlan.trade_plan.take_profit_3 || Number((plannedEntry + (plannedEntry - stopLoss) * 3).toFixed(2));
+    const takeProfit3 = activePlan.trade_plan.take_profit_3 || Number((plannedEntry + (plannedEntry - stopLoss) * 3).toFixed(activePlan.symbol_spec?.digits || 2));
     const riskRewardRatio = activePlan.trade_plan.risk_reward_ratio;
     const direction = activePlan.action === 'BUY' ? 'BUY' : (activePlan.action === 'SELL' ? 'SELL' : 'WAIT');
 
@@ -219,7 +224,7 @@ eaRouter.get('/signal', async (req, res) => {
     };
 
     console.log(
-      `\n[SPILLA][EA SIGNAL SERVED]\nPlan ID: ${planId}\nSnapshot ID: ${snapshotId}\nPlanned Entry: ${plannedEntry}\nCurrent Live Price: ${currentLivePrice}\nSL: ${stopLoss}\nTP1: ${takeProfit1}\nTP2: ${takeProfit2}\nStatus: ${activePlan.status}\n`
+      `\n[SPILLA][EA SIGNAL SERVED]\nSymbol: ${symbol}\nPlan ID: ${planId}\nSnapshot ID: ${snapshotId}\nPlanned Entry: ${plannedEntry}\nCurrent Live Price: ${currentLivePrice}\nSL: ${stopLoss}\nTP1: ${takeProfit1}\nTP2: ${takeProfit2}\nStatus: ${activePlan.status}\n`
     );
 
     res.json({

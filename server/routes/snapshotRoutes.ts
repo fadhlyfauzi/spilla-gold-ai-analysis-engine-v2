@@ -12,11 +12,12 @@ snapshotRouter.post('/save', (req, res) => {
       return res.status(400).json({ success: false, message: 'imageDataUrl is required' });
     }
 
+    const reqSym = (symbol as string) || 'XAUUSD';
     const snapshot = snapshotService.saveSnapshot({
       imageDataUrl,
-      symbol,
+      symbol: reqSym,
       timeframe,
-      currentPrice: Number(currentPrice) || marketDataService.getCurrentPrice(),
+      currentPrice: Number(currentPrice) || marketDataService.getCurrentPrice(reqSym),
     });
 
     return res.json({
@@ -39,8 +40,9 @@ snapshotRouter.post('/save', (req, res) => {
 // Get latest snapshot info & image
 snapshotRouter.get('/latest', (req, res) => {
   try {
-    const snapshot = snapshotService.getLatestSnapshot();
-    const history = snapshotService.getSignalHistory();
+    const reqSym = (req.query.symbol as string) || 'XAUUSD';
+    const snapshot = snapshotService.getLatestSnapshot(reqSym);
+    const history = snapshotService.getSignalHistory(reqSym);
     if (!snapshot) {
       return res.json({ success: true, snapshot: null, history });
     }
@@ -58,7 +60,8 @@ snapshotRouter.get('/latest', (req, res) => {
 // Get signal history logs
 snapshotRouter.get('/history', (req, res) => {
   try {
-    const history = snapshotService.getSignalHistory();
+    const reqSym = (req.query.symbol as string) || 'XAUUSD';
+    const history = snapshotService.getSignalHistory(reqSym);
     return res.json({ success: true, history });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err?.message || 'Error fetching history' });
@@ -68,15 +71,16 @@ snapshotRouter.get('/history', (req, res) => {
 // Run Gemini Multimodal Visual Pattern Analysis on the snapshot
 snapshotRouter.post('/analyze', async (req, res) => {
   try {
-    const { snapshotId, currentPrice } = req.body;
-    const latestSnap = snapshotService.getLatestSnapshot();
+    const { snapshotId, currentPrice, symbol } = req.body;
+    const reqSym = (symbol as string) || 'XAUUSD';
+    const latestSnap = snapshotService.getLatestSnapshot(reqSym);
 
     const result = await snapshotService.analyzeSnapshotWithGemini(
       latestSnap,
-      Number(currentPrice) || latestSnap?.currentPrice || marketDataService.getCurrentPrice()
+      Number(currentPrice) || latestSnap?.currentPrice || marketDataService.getCurrentPrice(reqSym)
     );
 
-    const history = snapshotService.getSignalHistory();
+    const history = snapshotService.getSignalHistory(reqSym);
 
     return res.json({
       success: true,

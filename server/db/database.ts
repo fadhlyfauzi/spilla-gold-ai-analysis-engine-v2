@@ -12,8 +12,8 @@ import { marketDataService } from '../services/marketDataService.js';
 
 class InMemoryDatabase {
   private history: AnalysisHistoryRecord[] = [];
-  private currentActiveSignal: ActiveSignal | null = null;
-  private activeTradePlanSnapshot: CopilotTradePlanSnapshot | null = null;
+  private activeSignals: Map<string, ActiveSignal> = new Map();
+  private activeTradePlanSnapshots: Map<string, CopilotTradePlanSnapshot> = new Map();
   private logs: SystemLog[] = [];
   private traderLogins: TraderLoginRecord[] = [];
   private collectorStatuses: Map<string, CollectorStatus> = new Map();
@@ -86,12 +86,12 @@ class InMemoryDatabase {
     });
 
     // Seed mock initial history
-    const basePrice = 2865.40;
     const pastRecords: AnalysisHistoryRecord[] = [
       {
         id: 'HIST-1001',
         timestamp: new Date(Date.now() - 3600000 * 4).toISOString(),
         price: 4242.20,
+        symbol: 'XAUUSD',
         recommendation: 'STRONG_BUY',
         fundamentalScore: 84,
         technicalScore: 88,
@@ -109,6 +109,7 @@ class InMemoryDatabase {
         id: 'HIST-1002',
         timestamp: new Date(Date.now() - 3600000 * 12).toISOString(),
         price: 4235.10,
+        symbol: 'XAUUSD',
         recommendation: 'BUY',
         fundamentalScore: 78,
         technicalScore: 81,
@@ -126,6 +127,7 @@ class InMemoryDatabase {
         id: 'HIST-1003',
         timestamp: new Date(Date.now() - 3600000 * 24).toISOString(),
         price: 4258.90,
+        symbol: 'XAUUSD',
         recommendation: 'WAIT',
         fundamentalScore: 52,
         technicalScore: 49,
@@ -168,25 +170,23 @@ class InMemoryDatabase {
     ];
 
     this.history = pastRecords;
-
-    // Active Trade Plan Snapshot is initialized to null on startup; populated dynamically upon first capture or live market event
-    this.activeTradePlanSnapshot = null;
-    this.currentActiveSignal = null;
   }
 
-  public getActiveTradePlanSnapshot(): CopilotTradePlanSnapshot | null {
-    return this.activeTradePlanSnapshot;
+  public getActiveTradePlanSnapshot(symbol?: string): CopilotTradePlanSnapshot | null {
+    const sym = (symbol || 'XAUUSD').trim().toUpperCase();
+    return this.activeTradePlanSnapshots.get(sym) || null;
   }
 
   public setActiveTradePlanSnapshot(snapshot: CopilotTradePlanSnapshot): CopilotTradePlanSnapshot {
-    const oldSnapshot = this.activeTradePlanSnapshot;
+    const sym = (snapshot.symbol || 'XAUUSD').trim().toUpperCase();
+    const oldSnapshot = this.activeTradePlanSnapshots.get(sym);
     if (oldSnapshot && oldSnapshot.planId !== snapshot.planId) {
       console.log(
-        `[TRADE PLAN MUTATION] Plan replaced:\n  Old Plan ID: ${oldSnapshot.planId} (Planned Entry: ${oldSnapshot.trade_plan.entry_price})\n  New Plan ID: ${snapshot.planId} (Planned Entry: ${snapshot.trade_plan.entry_price})\n  Timestamp: ${new Date().toISOString()}\n  Source: CREATE_NEW_PLAN\n  Reason: Explicit Plan Generation`
+        `[TRADE PLAN MUTATION] Plan replaced for ${sym}:\n  Old Plan ID: ${oldSnapshot.planId} (Planned Entry: ${oldSnapshot.trade_plan.entry_price})\n  New Plan ID: ${snapshot.planId} (Planned Entry: ${snapshot.trade_plan.entry_price})\n  Timestamp: ${new Date().toISOString()}\n  Source: CREATE_NEW_PLAN\n  Reason: Explicit Plan Generation`
       );
     }
-    this.activeTradePlanSnapshot = snapshot;
-    return this.activeTradePlanSnapshot;
+    this.activeTradePlanSnapshots.set(sym, snapshot);
+    return snapshot;
   }
 
   public logTradePlanMutation(planId: string, oldPlannedEntry: number, newPlannedEntry: number, source: string, reason: string) {
@@ -205,36 +205,45 @@ class InMemoryDatabase {
     return this.settings;
   }
 
-  public getHistory(): AnalysisHistoryRecord[] {
+  public getHistory(symbol?: string): AnalysisHistoryRecord[] {
+    if (symbol) {
+      const sym = symbol.trim().toUpperCase();
+      return this.history.filter((h) => (h.symbol || 'XAUUSD').toUpperCase() === sym);
+    }
     return this.history;
   }
 
-  public getActiveSignal(): ActiveSignal | null {
-    // Stale Signal Protection: If active signal entry price differs significantly from live market price (> $10), expire it
-    if (this.currentActiveSignal) {
-      const currentMarketPrice = marketDataService.getCurrentPrice();
-      const priceDiff = Math.abs(this.currentActiveSignal.entryPrice - currentMarketPrice);
-      const ageMinutes = (Date.now() - new Date(this.currentActiveSignal.createdAt).getTime()) / 60000;
+  public getActiveSignal(symbol?: string): ActiveSignal | null {
+    const sym = (symbol || 'XAUUSD').trim().toUpperCase();
+    const signal = this.activeSignals.get(sym);
+    if (!signal) return null;
 
-      if (priceDiff > 10.0 || ageMinutes > 30) {
-        console.log(`[FORENSIC STALE SIGNAL EXPIRED] Expiry triggered for ${this.currentActiveSignal.signalId}: entryPrice=$${this.currentActiveSignal.entryPrice}, currentMarketPrice=$${currentMarketPrice}, diff=$${priceDiff.toFixed(2)}, age=${ageMinutes.toFixed(1)}m`);
-        this.currentActiveSignal.status = 'EXPIRED';
-        this.currentActiveSignal = null;
-      }
+    // Stale Signal Protection: If active signal entry price differs significantly from live market price, expire it
+    const currentMarketPrice = marketDataService.getCurrentPrice(sym);
+    const priceDiff = Math.abs(signal.entryPrice - currentMarketPrice);
+    const ageMinutes = (Date.now() - new Date(signal.createdAt).getTime()) / 60000;
+    const maxThreshold = sym === 'BTCUSD' ? 500.0 : sym.includes('XAU') ? 15.0 : 0.01;
+
+    if (priceDiff > maxThreshold || ageMinutes > 60) {
+      console.log(`[FORENSIC STALE SIGNAL EXPIRED] Expiry triggered for ${sym} signal ${signal.signalId}: entryPrice=${signal.entryPrice}, currentMarketPrice=${currentMarketPrice}, diff=${priceDiff.toFixed(2)}, age=${ageMinutes.toFixed(1)}m`);
+      signal.status = 'EXPIRED';
+      this.activeSignals.delete(sym);
+      return null;
     }
 
-    console.log(`[FORENSIC DATABASE ACTIVE SIGNAL] signalId=${this.currentActiveSignal?.signalId || 'NONE'} entryPrice=${this.currentActiveSignal?.entryPrice || 0} createdAt=${this.currentActiveSignal?.createdAt || 'N/A'} updatedAt=${this.currentActiveSignal?.updatedAt || 'N/A'} status=${this.currentActiveSignal?.status || 'N/A'}`);
-    return this.currentActiveSignal;
+    console.log(`[FORENSIC DATABASE ACTIVE SIGNAL] symbol=${sym} signalId=${signal.signalId} entryPrice=${signal.entryPrice} status=${signal.status}`);
+    return signal;
   }
 
   public setActiveSignal(signal: Partial<ActiveSignal>): ActiveSignal {
     const now = new Date().toISOString();
+    const sym = (signal.symbol || 'XAUUSD').trim().toUpperCase();
     const signalId = signal.signalId || `SIG-${now.replace(/[-:T.]/g, '').slice(0, 12)}`;
     const aiEntry = signal.signalEntryPrice ?? signal.entryPrice ?? 0;
     
     const fullSignal: ActiveSignal = {
       signalId,
-      symbol: signal.symbol || 'XAUUSD',
+      symbol: sym,
       direction: signal.direction || 'BUY',
       confidence: signal.confidence ?? 90,
       entryPrice: aiEntry, // AI Signal Entry Price (Immutable)
@@ -257,8 +266,8 @@ class InMemoryDatabase {
       updatedAt: now,
     };
 
-    this.currentActiveSignal = fullSignal;
-    console.log(`[FORENSIC SET ACTIVE SIGNAL] signalId=${fullSignal.signalId} signalEntryPrice=${fullSignal.entryPrice} status=${fullSignal.status}`);
+    this.activeSignals.set(sym, fullSignal);
+    console.log(`[FORENSIC SET ACTIVE SIGNAL] symbol=${sym} signalId=${fullSignal.signalId} signalEntryPrice=${fullSignal.entryPrice} status=${fullSignal.status}`);
 
     // Upsert into signal history
     const existingIndex = this.history.findIndex((h) => h.signalId === signalId);
@@ -300,7 +309,7 @@ class InMemoryDatabase {
       if (this.history.length > 200) this.history.pop();
     }
 
-    this.addLog('INFO', 'AI_SIGNAL', `Active signal updated: ${signalId} [${fullSignal.direction}] @ $${fullSignal.entryPrice}`);
+    this.addLog('INFO', 'AI_SIGNAL', `Active signal updated for ${sym}: ${signalId} [${fullSignal.direction}] @ ${fullSignal.entryPrice}`);
     return fullSignal;
   }
 
@@ -316,40 +325,57 @@ class InMemoryDatabase {
       executedAt?: string;
       closedResult?: string;
       returnPips?: number;
+      symbol?: string;
     }
   ): ActiveSignal | null {
     const now = new Date().toISOString();
-    const activeSig = this.currentActiveSignal;
+    let targetSignal: ActiveSignal | null = null;
+    let targetSym = updates.symbol;
 
-    if (activeSig && (activeSig.signalId === signalId || !signalId)) {
-      const reqPrice = updates.requestedExecutionPrice ?? activeSig.requestedExecutionPrice ?? activeSig.signalEntryPrice ?? activeSig.entryPrice;
-      const actPrice = updates.actualExecutionPrice ?? activeSig.actualExecutionPrice;
+    if (targetSym) {
+      targetSignal = this.activeSignals.get(targetSym.trim().toUpperCase()) || null;
+    } else {
+      for (const [sym, sig] of this.activeSignals.entries()) {
+        if (sig.signalId === signalId) {
+          targetSignal = sig;
+          targetSym = sym;
+          break;
+        }
+      }
+    }
+
+    if (targetSignal && targetSym) {
+      const reqPrice = updates.requestedExecutionPrice ?? targetSignal.requestedExecutionPrice ?? targetSignal.signalEntryPrice ?? targetSignal.entryPrice;
+      const actPrice = updates.actualExecutionPrice ?? targetSignal.actualExecutionPrice;
 
       let slippage = updates.executionSlippage;
       if (slippage === undefined && actPrice !== undefined) {
-        const isBuy = activeSig.direction === 'BUY';
+        const isBuy = targetSignal.direction === 'BUY';
         slippage = isBuy ? actPrice - reqPrice : reqPrice - actPrice;
         slippage = Number(slippage.toFixed(2));
       }
 
-      this.currentActiveSignal = {
-        ...activeSig,
+      const updatedSignal = {
+        ...targetSignal,
         ...(updates.mt5Ticket !== undefined && { mt5Ticket: updates.mt5Ticket }),
         ...(updates.executionStatus && { executionStatus: updates.executionStatus }),
         ...(updates.status && { status: updates.status as any }),
         requestedExecutionPrice: reqPrice,
         ...(actPrice !== undefined && { actualExecutionPrice: actPrice }),
         ...(slippage !== undefined && { executionSlippage: slippage }),
-        executedAt: updates.executedAt || activeSig.executedAt || now,
+        executedAt: updates.executedAt || targetSignal.executedAt || now,
         ...(updates.closedResult !== undefined && { closedResult: updates.closedResult }),
         updatedAt: now,
       };
 
-      console.log(`[EXECUTION UPDATE] Signal=${activeSig.signalId} SignalEntry=$${activeSig.entryPrice} Requested=$${reqPrice} ActualFill=${actPrice} Slippage=${slippage} Ticket=#${updates.mt5Ticket}`);
+      this.activeSignals.set(targetSym, updatedSignal);
+      targetSignal = updatedSignal;
+
+      console.log(`[EXECUTION UPDATE] Symbol=${targetSym} Signal=${targetSignal.signalId} SignalEntry=${targetSignal.entryPrice} Requested=${reqPrice} ActualFill=${actPrice} Slippage=${slippage} Ticket=#${updates.mt5Ticket}`);
     }
 
     // Update history record
-    const target = this.history.find((h) => h.signalId === signalId || (!signalId && h.signalId === this.currentActiveSignal?.signalId));
+    const target = this.history.find((h) => h.signalId === signalId);
     if (target) {
       const reqPrice = updates.requestedExecutionPrice ?? target.requestedExecutionPrice ?? target.signalEntryPrice ?? target.entryPrice;
       const actPrice = updates.actualExecutionPrice ?? target.actualExecutionPrice;
@@ -373,7 +399,7 @@ class InMemoryDatabase {
     }
 
     this.addLog('INFO', 'EA_EXECUTION', `Signal execution updated for ${signalId}: status=${updates.status}, ticket=${updates.mt5Ticket}, fillPrice=${updates.actualExecutionPrice}`);
-    return this.currentActiveSignal;
+    return targetSignal;
   }
 
   public addHistoryRecord(record: Omit<AnalysisHistoryRecord, 'id'>): AnalysisHistoryRecord {

@@ -26,12 +26,14 @@ riskRouter.get('/', (req, res) => {
 export const recommendationRouter = Router();
 recommendationRouter.get('/', async (req, res) => {
   try {
-    const rec = await recommendationEngine.generateRecommendation();
+    const reqSym = (req.query.symbol as string) || 'XAUUSD';
+    const rec = await recommendationEngine.generateRecommendation(reqSym);
     
     // Save snapshot to history DB if requested
     if (req.query.save === 'true') {
       db.addHistoryRecord({
         timestamp: new Date().toISOString(),
+        symbol: reqSym,
         price: rec.currentPrice,
         recommendation: rec.recommendation,
         fundamentalScore: rec.fundamentalScore.score,
@@ -56,7 +58,8 @@ recommendationRouter.get('/', async (req, res) => {
 export const aiRouter = Router();
 aiRouter.get('/', async (req, res) => {
   try {
-    const rec = await recommendationEngine.generateRecommendation();
+    const reqSym = (req.query.symbol as string) || 'XAUUSD';
+    const rec = await recommendationEngine.generateRecommendation(reqSym);
     res.json(rec.aiConfidence);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -66,12 +69,13 @@ aiRouter.get('/', async (req, res) => {
 // GET /api/ai/current-signal - Single Source of Truth Active AI Signal
 aiRouter.get('/current-signal', async (req, res) => {
   try {
-    let activeSignal = db.getActiveSignal();
+    const reqSym = (req.query.symbol as string) || 'XAUUSD';
+    let activeSignal = db.getActiveSignal(reqSym);
     if (!activeSignal) {
-      await recommendationEngine.generateRecommendation();
-      activeSignal = db.getActiveSignal();
+      await recommendationEngine.generateRecommendation(reqSym);
+      activeSignal = db.getActiveSignal(reqSym);
     }
-    console.log(`[FORENSIC API CURRENT SIGNAL] signalId=${activeSignal?.signalId || 'NONE'} entryPrice=${activeSignal?.entryPrice || 0} status=${activeSignal?.status || 'N/A'}`);
+    console.log(`[FORENSIC API CURRENT SIGNAL] symbol=${reqSym} signalId=${activeSignal?.signalId || 'NONE'} entryPrice=${activeSignal?.entryPrice || 0} status=${activeSignal?.status || 'N/A'}`);
     res.json({
       success: true,
       activeSignal,
@@ -84,7 +88,8 @@ aiRouter.get('/current-signal', async (req, res) => {
 // GET /api/ai/signal-history - Signal History directly from database
 aiRouter.get('/signal-history', (req, res) => {
   try {
-    const history = db.getHistory();
+    const reqSym = req.query.symbol as string | undefined;
+    const history = db.getHistory(reqSym);
     res.json({
       success: true,
       history,
@@ -109,7 +114,8 @@ aiRouter.post('/assistant', async (req, res) => {
 
 export const historyRouter = Router();
 historyRouter.get('/', (req, res) => {
-  res.json(db.getHistory());
+  const reqSym = req.query.symbol as string | undefined;
+  res.json(db.getHistory(reqSym));
 });
 
 export const collectorsRouter = Router();

@@ -202,10 +202,11 @@ copilotRouter.post('/analyze', async (req, res) => {
  * GET /api/copilot/active-plan
  * Retrieves the current immutable Trade Plan Snapshot and Real-time Live Market State.
  */
-copilotRouter.get('/active-plan', async (_req, res) => {
+copilotRouter.get('/active-plan', async (req, res) => {
   try {
-    const snapshot = copilotService.getActiveSnapshot();
-    const liveMarketState = marketDataService.getLiveMarketState();
+    const reqSym = (req.query.symbol as string) || 'XAUUSD';
+    const snapshot = copilotService.getActiveSnapshot(reqSym);
+    const liveMarketState = marketDataService.getLiveMarketState(reqSym);
 
     res.json({
       success: true,
@@ -224,10 +225,10 @@ copilotRouter.get('/active-plan', async (_req, res) => {
 copilotRouter.post('/validate-plan', (req, res) => {
   try {
     const { symbol, equity, mode, riskPercent, fixedLot, fixedRiskAmount, entryPrice, stopLoss } = req.body || {};
-    const activeSnapshot = copilotService.getActiveSnapshot();
+    const sym = symbol || 'XAUUSD';
+    const activeSnapshot = copilotService.getActiveSnapshot(sym);
 
-    const sym = symbol || activeSnapshot?.symbol || 'XAUUSD';
-    const entry = entryPrice ?? activeSnapshot?.trade_plan.entry_price ?? marketDataService.getCurrentPrice();
+    const entry = entryPrice ?? activeSnapshot?.trade_plan.entry_price ?? marketDataService.getCurrentPrice(sym);
     const sl = stopLoss ?? activeSnapshot?.trade_plan.stop_loss ?? (entry - 15);
 
     const posSizing = positionSizingEngine.calculate(
@@ -259,8 +260,8 @@ copilotRouter.post('/validate-plan', (req, res) => {
  */
 copilotRouter.post('/lock-plan', (req, res) => {
   try {
-    const { price } = req.body || {};
-    const lockedSnapshot = copilotService.lockActiveTradePlan(price ? Number(price) : undefined);
+    const { price, symbol } = req.body || {};
+    const lockedSnapshot = copilotService.lockActiveTradePlan(symbol, price ? Number(price) : undefined);
     res.json({
       success: true,
       message: 'Dynamic Trade Plan successfully locked as Execution Plan',
@@ -276,9 +277,10 @@ copilotRouter.post('/lock-plan', (req, res) => {
  * POST /api/copilot/unlock-plan
  * Returns locked trade plan back to continuous DYNAMIC tracking mode.
  */
-copilotRouter.post('/unlock-plan', (_req, res) => {
+copilotRouter.post('/unlock-plan', (req, res) => {
   try {
-    const dynamicSnapshot = copilotService.unlockActiveTradePlan();
+    const { symbol } = req.body || {};
+    const dynamicSnapshot = copilotService.unlockActiveTradePlan(symbol);
     res.json({
       success: true,
       message: 'Trade Plan returned to DYNAMIC LIVE tracking mode',
@@ -340,12 +342,13 @@ copilotRouter.post('/set-price', (req, res) => {
     if (!numericPrice || isNaN(numericPrice) || numericPrice <= 0) {
       return res.status(400).json({ success: false, error: 'Valid price number required' });
     }
-    marketDataService.updatePriceFromProvider(numericPrice, 'USER_CHART_SYNC');
+    const reqSym = symbol || 'XAUUSD';
+    marketDataService.updatePriceFromProvider(numericPrice, 'USER_CHART_SYNC', reqSym);
     res.json({
       success: true,
       price: numericPrice,
-      symbol: symbol || 'XAUUSD',
-      liveMarket: marketDataService.getLiveMarketState(),
+      symbol: reqSym,
+      liveMarket: marketDataService.getLiveMarketState(reqSym),
     });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });

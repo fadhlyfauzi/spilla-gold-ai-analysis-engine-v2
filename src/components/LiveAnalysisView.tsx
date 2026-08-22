@@ -355,7 +355,28 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
       })
       .catch((err) => console.error('Failed to load symbols:', err));
 
-    fetch('/api/copilot/active-plan')
+    fetchExecutionQueue();
+    loadHistoryData();
+  }, []);
+
+  // Strict Market State Isolation: Immediately clear and re-initialize state on symbol switch
+  useEffect(() => {
+    // 1. Immediately reset all market-specific transient state
+    setSnapshot(null);
+    setActiveTradePlan(null);
+    setExecutionParameters(null);
+    setCurrentPrice(0);
+    setCapturedPrice(null);
+    setExecutionResult(null);
+    setActiveSignalState(null);
+    setManualChartPrice('');
+    setPastedScreenshot(null);
+    setCapturedChartBase64(null);
+    setCaptureError(null);
+    setBackendLiveMarket(null);
+
+    // 2. Fetch symbol-specific active plan and current price
+    fetch(`/api/copilot/active-plan?symbol=${selectedSymbol}`)
       .then((res) => res.json())
       .then((data) => {
         if (data.success && data.snapshot) {
@@ -363,15 +384,23 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
           if (data.snapshot.tradingStyle) setTradingStyle(data.snapshot.tradingStyle);
           if (data.snapshot.capturePrice) setCapturedPrice(data.snapshot.capturePrice);
           if (data.snapshot.trade_plan) setActiveTradePlan(data.snapshot.trade_plan);
-          if (data.snapshot.symbol) setSelectedSymbol(data.snapshot.symbol);
-          if (data.snapshot.timeframe) setSelectedTimeframe(data.snapshot.timeframe);
+        }
+        if (data.success && data.liveMarket?.midPrice) {
+          setCurrentPrice(data.liveMarket.midPrice);
+          setBackendLiveMarket(data.liveMarket);
         }
       })
-      .catch((err) => console.error('Failed to load active plan:', err));
+      .catch((err) => console.error('Failed to load active plan for symbol:', err));
 
-    fetchExecutionQueue();
-    loadHistoryData();
-  }, []);
+    fetch(`/api/market/current?symbol=${selectedSymbol}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (data?.price && data.price > 0) {
+          setCurrentPrice(data.price);
+        }
+      })
+      .catch(() => {});
+  }, [selectedSymbol]);
 
   const loadHistoryData = async () => {
     try {
@@ -558,10 +587,10 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
       if (isAnalyzingRef.current) return;
       try {
         const [mt5Res, signalRes, historyRes, activePlanRes] = await Promise.all([
-          fetch('/api/ea/mt5-data').catch(() => null),
-          fetch('/api/ai/current-signal').catch(() => null),
-          fetch('/api/ai/signal-history').catch(() => null),
-          fetch('/api/copilot/active-plan').catch(() => null),
+          fetch(`/api/ea/mt5-data?symbol=${selectedSymbol}`).catch(() => null),
+          fetch(`/api/ai/current-signal?symbol=${selectedSymbol}`).catch(() => null),
+          fetch(`/api/ai/signal-history?symbol=${selectedSymbol}`).catch(() => null),
+          fetch(`/api/copilot/active-plan?symbol=${selectedSymbol}`).catch(() => null),
         ]);
 
         if (isAnalyzingRef.current) return;
@@ -640,7 +669,7 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
     fetchRealtimeSync();
     const interval = setInterval(fetchRealtimeSync, 3000);
     return () => clearInterval(interval);
-  }, []);
+  }, [selectedSymbol]);
 
   // 4. Copilot AI Analysis & Automated Capture Trigger (ANALYSIS NOW button)
   const executeAnalysisNow = async (overrideBase64?: string) => {
@@ -668,7 +697,7 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
         marketAsk = manualNum + 0.20;
       } else {
         try {
-          const canonicalRes = await fetch('/api/market/canonical');
+          const canonicalRes = await fetch(`/api/market/canonical?symbol=${selectedSymbol}`);
           if (canonicalRes.ok) {
             const canonicalData = await canonicalRes.json();
             if (canonicalData?.price && Number(canonicalData.price) > 0) {
