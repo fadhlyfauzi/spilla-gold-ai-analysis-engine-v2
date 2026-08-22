@@ -1024,6 +1024,7 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
         snapshotId: currentParams.snapshotId,
         tradingAccountId: connectedAccount?.id,
         symbol: currentParams.symbol,
+        canonicalSymbol: currentParams.canonicalSymbol || currentParams.symbol,
         side: currentParams.side,
         orderType: 'MARKET',
         lot: Number(currentParams.lot.toFixed(2)),

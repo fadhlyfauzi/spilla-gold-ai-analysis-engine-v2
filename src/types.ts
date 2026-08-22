@@ -849,6 +849,8 @@ export interface TradeExecutionOrder {
   brokerServer?: string;
 
   symbol: string;
+  canonicalSymbol?: string;
+  brokerSymbol?: string;
   side: 'BUY' | 'SELL';
 
   orderType: 'MARKET' | 'LIMIT' | 'STOP';

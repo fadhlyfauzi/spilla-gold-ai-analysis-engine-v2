@@ -36,6 +36,11 @@ tradeRouter.post('/validate-gate', requireAuth, async (req: any, res: any) => {
       });
     }
 
+    const inputSymbol = payload.canonicalSymbol || payload.symbol || 'XAUUSD';
+    const canonicalSymbol = symbolService.resolveSymbol(inputSymbol).canonicalSymbol;
+    payload.symbol = canonicalSymbol;
+    payload.canonicalSymbol = canonicalSymbol;
+
     const gateResult = tradeService.validateExecutionGate(payload, {
       tradingAccount,
       currentUser,
@@ -134,14 +139,17 @@ tradeRouter.post('/execute', requireAuth, async (req: any, res: any) => {
       }
     }
 
-    // 2. Resolve broker execution symbol from canonical symbol and connected account
+    // 2. Resolve canonical symbol and broker execution symbol
     const inputSymbol = payload.canonicalSymbol || payload.symbol || 'XAUUSD';
+    const canonicalSymbol = symbolService.resolveSymbol(inputSymbol).canonicalSymbol;
     const brokerSymbol =
       payload.brokerSymbol && payload.brokerSymbol.trim()
         ? payload.brokerSymbol.trim()
-        : symbolService.mapCanonicalToBroker(inputSymbol, tradingAccount.symbol);
+        : symbolService.mapCanonicalToBroker(canonicalSymbol, tradingAccount.symbol);
 
     // 3. Execute order through authoritative server-side execution & risk gate
+    // CRITICAL: order.symbol must ALWAYS be the canonical SPILLA GOLD symbol (e.g. BTCUSD, XAUUSD, EURUSD)
+    // Broker-specific symbol (e.g. BTCUSD.edge) is stored separately as brokerSymbol and used by the MT5 mapping layer
     const orderPayload = {
       ...payload,
       tradingAccountId: tradingAccount.id,
@@ -151,7 +159,9 @@ tradeRouter.post('/execute', requireAuth, async (req: any, res: any) => {
       userId: currentUser.id,
       broker: tradingAccount.broker || 'AIMS',
       brokerServer: tradingAccount.brokerServer || 'AIMS-Live',
-      symbol: brokerSymbol,
+      symbol: canonicalSymbol,
+      canonicalSymbol: canonicalSymbol,
+      brokerSymbol: brokerSymbol,
     };
 
     const result = tradeService.executeOrder(orderPayload, {
@@ -171,7 +181,7 @@ tradeRouter.post('/execute', requireAuth, async (req: any, res: any) => {
     }
 
     console.log(
-      `[DYNAMIC EXECUTION DISPATCHED] Signal=${result.order?.signalId} User=${currentUser.id} Account=${tradingAccount.accountNumber} Worker=${tradingAccount.workerId} Symbol=${brokerSymbol}`
+      `[DYNAMIC EXECUTION DISPATCHED] Signal=${result.order?.signalId} User=${currentUser.id} Account=${tradingAccount.accountNumber} Worker=${tradingAccount.workerId} CanonicalSymbol=${canonicalSymbol} BrokerSymbol=${brokerSymbol}`
     );
 
     return res.json({
@@ -182,6 +192,7 @@ tradeRouter.post('/execute', requireAuth, async (req: any, res: any) => {
       mode: MT5_EXECUTION_MODE,
       targetWorkerId: tradingAccount.workerId,
       accountNumber: tradingAccount.accountNumber,
+      canonicalSymbol: canonicalSymbol,
       brokerSymbol: brokerSymbol,
       order: result.order,
     });
