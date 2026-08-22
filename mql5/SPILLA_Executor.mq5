@@ -6,7 +6,7 @@
 #property copyright   "Copyright 2026, SPILLA GOLD Institutional Engine"
 #property link        "https://ai.studio"
 #property version     "2.30"
-#property description "SPILLA GOLD Automated Multi-Market Trade Execution Worker for MetaTrader 5 (DEMO ONLY)"
+#property description "SPILLA GOLD Automated Multi-Market Trade Execution Worker for MetaTrader 5"
 #property strict
 
 //+------------------------------------------------------------------+
@@ -24,8 +24,9 @@ input string   InpApiBaseUrl            = "https://ais-dev-ckdy5yfqugrvrauecjzng
 input string   InpApiKey                = "";                                                                       // API Key / Bearer Secret (Optional)
 input string   InpWorkerId              = "MT5_DEMO_WORKER_1";                                                      // Worker Identifier
 input int      InpPollIntervalSec       = 3;                                                                        // Queue Polling Interval (Seconds)
+input int      InpHeartbeatIntervalSec  = 10;                                                                       // Heartbeat Interval (Seconds)
 
-input group "=== [2] EXECUTION SAFEGUARDS (DEMO ONLY) ==="
+input group "=== [2] EXECUTION SAFEGUARDS ==="
 input bool     InpEnableExecution       = false;                                                                    // Master Execution Switch (false = Dry-Run only)
 input long     InpExpectedAccountLogin  = 0;                                                                        // Expected Account Login (0 = Ignore check)
 input string   InpWebSymbol             = "XAUUSD";                                                                 // Canonical Web Symbol (e.g. XAUUSD, BTCUSD, EURUSD, GBPUSD, USDJPY, XAUUSD.CENT)
@@ -70,7 +71,7 @@ datetime       g_lastHeartbeatTime      = 0;
 string         g_executedSignals[];     // Local in-memory duplicate cache
 
 // Forward declarations
-void SendHeartbeat();
+bool SendHeartbeat();
 bool ClaimNextOrder(SPILLA_Order &order);
 void ProcessClaimedOrder(const SPILLA_Order &order);
 bool NotifyProcessingState(const string signalId);
@@ -100,16 +101,26 @@ int OnInit()
    Print("[SPILLA EXECUTOR] Broker Trading Symbol: ", InpBrokerSymbol);
    Print("[SPILLA EXECUTOR] Max Configured Spread: ", InpMaxSpreadPoints, " points");
    Print("[SPILLA EXECUTOR] Execution Enabled: ", (InpEnableExecution ? "YES (LIVE MT5 ORDERS)" : "NO (DRY-RUN SAFEGUARD MODE)"));
+   Print("[SPILLA EXECUTOR] Heartbeat every ", InpHeartbeatIntervalSec, " seconds.");
+   Print("[SPILLA EXECUTOR] Polling interval: ", InpPollIntervalSec, " seconds.");
 
-   // 1. Check Account Mode (DEMO ONLY RESTRICTION)
+   // 1. Detect Account Mode (REAL, DEMO, CONTEST)
    ENUM_ACCOUNT_TRADE_MODE tradeMode = (ENUM_ACCOUNT_TRADE_MODE)AccountInfoInteger(ACCOUNT_TRADE_MODE);
+   string accountModeStr = "UNKNOWN";
    if(tradeMode == ACCOUNT_TRADE_MODE_REAL)
    {
-      Print("[CRITICAL ERROR] REAL MONEY ACCOUNT DETECTED (Login #", AccountInfoInteger(ACCOUNT_LOGIN), ").");
-      Print("[CRITICAL ERROR] SPILLA GOLD Phase 2 Executor EA is strictly restricted to DEMO accounts only!");
-      Alert("SPILLA EXECUTOR HALTED: Real money accounts are forbidden in Phase 2!");
-      return(INIT_FAILED);
+      accountModeStr = "REAL";
    }
+   else if(tradeMode == ACCOUNT_TRADE_MODE_DEMO)
+   {
+      accountModeStr = "DEMO";
+   }
+   else if(tradeMode == ACCOUNT_TRADE_MODE_CONTEST)
+   {
+      accountModeStr = "CONTEST";
+   }
+
+   Print("[SPILLA EXECUTOR] Account Mode: ", accountModeStr);
 
    // 2. Account Login Verification
    long currentLogin = AccountInfoInteger(ACCOUNT_LOGIN);
@@ -139,17 +150,17 @@ int OnInit()
    // 5. Send Initial Heartbeat
    SendHeartbeat();
    g_lastHeartbeatTime = TimeCurrent();
+   g_lastPollTime = TimeCurrent();
 
-   // 6. Initialize Timer
-   int pollSeconds = (InpPollIntervalSec < 1) ? 1 : InpPollIntervalSec;
-   if(!EventSetTimer(pollSeconds))
+   // 6. Initialize Timer (1-second tick resolution for independent heartbeat and queue scheduling)
+   if(!EventSetTimer(1))
    {
-      Print("[ERROR] Failed to start timer with interval ", pollSeconds, "s.");
+      Print("[ERROR] Failed to start 1-second scheduler timer.");
       return(INIT_FAILED);
    }
 
-   Print("[SPILLA EXECUTOR] Polling timer started. Interval: ", pollSeconds, " seconds.");
-   Print("[SPILLA EXECUTOR] Initialized successfully on Account #", currentLogin, " (DEMO).");
+   Print("[SPILLA EXECUTOR] Scheduler timer started (1s resolution).");
+   Print("[SPILLA EXECUTOR] Initialized successfully on Account #", currentLogin, " (", accountModeStr, ").");
    Print("====================================================================");
 
    return(INIT_SUCCEEDED);
@@ -171,61 +182,87 @@ void OnTimer()
 {
    if(g_isNetworkBusy)
    {
-      Print("[SPILLA EXECUTOR] Skipping poll cycle: previous request still active.");
       return;
    }
 
-   g_isNetworkBusy = true;
-
-   // Send periodic heartbeat every ~12 seconds
    datetime now = TimeCurrent();
-   if(now - g_lastHeartbeatTime >= 12)
+
+   // 1. Independent Heartbeat Check (Runs unconditionally every InpHeartbeatIntervalSec)
+   int heartbeatInterval = (InpHeartbeatIntervalSec < 1) ? 10 : InpHeartbeatIntervalSec;
+   if(now - g_lastHeartbeatTime >= heartbeatInterval || g_lastHeartbeatTime == 0)
    {
+      g_isNetworkBusy = true;
       SendHeartbeat();
-      g_lastHeartbeatTime = now;
+      g_lastHeartbeatTime = TimeCurrent();
+      g_isNetworkBusy = false;
    }
 
-   // 1. Attempt to claim next order from backend queue
-   SPILLA_Order order;
-   bool hasOrder = ClaimNextOrder(order);
-
-   if(hasOrder)
+   // 2. Independent Order Queue Polling Check
+   int pollInterval = (InpPollIntervalSec < 1) ? 3 : InpPollIntervalSec;
+   if(now - g_lastPollTime >= pollInterval || g_lastPollTime == 0)
    {
-      Print("--------------------------------------------------------------------");
-      Print("[SPILLA EXECUTOR] CLAIMED ORDER DETECTED: SignalId=", order.signalId, " WebSymbol=", order.symbol, " Side=", order.side, " Lot=", DoubleToString(order.lot, 2));
+      g_lastPollTime = TimeCurrent();
+      g_isNetworkBusy = true;
 
-      // 2. Process and execute claimed order
-      ProcessClaimedOrder(order);
-      Print("--------------------------------------------------------------------");
+      // Attempt to claim next order from backend queue
+      SPILLA_Order order;
+      bool hasOrder = ClaimNextOrder(order);
+
+      if(hasOrder)
+      {
+         Print("--------------------------------------------------------------------");
+         Print("[SPILLA EXECUTOR] CLAIMED ORDER DETECTED: SignalId=", order.signalId, " WebSymbol=", order.symbol, " Side=", order.side, " Lot=", DoubleToString(order.lot, 2));
+
+         // Process and execute claimed order
+         ProcessClaimedOrder(order);
+         Print("--------------------------------------------------------------------");
+      }
+
+      g_isNetworkBusy = false;
    }
-
-   g_isNetworkBusy = false;
-   g_lastPollTime = TimeCurrent();
 }
 
 //+------------------------------------------------------------------+
 //| Send Heartbeat to SPILLA Server                                  |
 //+------------------------------------------------------------------+
-void SendHeartbeat()
+bool SendHeartbeat()
 {
    long login = AccountInfoInteger(ACCOUNT_LOGIN);
-   if(login <= 0) return;
+   if(login <= 0) return(false);
+
+   string brokerServer = AccountInfoString(ACCOUNT_SERVER);
+   double balance      = AccountInfoDouble(ACCOUNT_BALANCE);
+   double equity       = AccountInfoDouble(ACCOUNT_EQUITY);
+   double freeMargin   = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+   int leverage        = (int)AccountInfoInteger(ACCOUNT_LEVERAGE);
+   bool isLive         = (AccountInfoInteger(ACCOUNT_TRADE_MODE) == ACCOUNT_TRADE_MODE_REAL);
 
    string body = "{"
       + "\"workerId\":\"" + InpWorkerId + "\","
       + "\"accountNumber\":\"" + IntegerToString(login) + "\","
-      + "\"brokerServer\":\"" + AccountInfoString(ACCOUNT_SERVER) + "\","
+      + "\"brokerServer\":\"" + brokerServer + "\","
       + "\"symbol\":\"" + InpBrokerSymbol + "\","
-      + "\"balance\":" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + ","
-      + "\"equity\":" + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) + ","
-      + "\"freeMargin\":" + DoubleToString(AccountInfoDouble(ACCOUNT_MARGIN_FREE), 2) + ","
-      + "\"leverage\":" + IntegerToString(AccountInfoInteger(ACCOUNT_LEVERAGE)) + ","
-      + "\"isLive\":" + (AccountInfoInteger(ACCOUNT_TRADE_MODE) == ACCOUNT_TRADE_MODE_REAL ? "true" : "false")
+      + "\"balance\":" + DoubleToString(balance, 2) + ","
+      + "\"equity\":" + DoubleToString(equity, 2) + ","
+      + "\"freeMargin\":" + DoubleToString(freeMargin, 2) + ","
+      + "\"leverage\":" + IntegerToString(leverage) + ","
+      + "\"isLive\":" + (isLive ? "true" : "false")
       + "}";
 
    string response = "";
    int httpStatus = 0;
-   HttpSend("/api/mt5/heartbeat", "POST", body, response, httpStatus);
+   bool ok = HttpSend("/api/mt5/heartbeat", "POST", body, response, httpStatus);
+
+   if(ok && httpStatus == 200)
+   {
+      Print("[SPILLA HEARTBEAT] ONLINE | Worker=", InpWorkerId, " | Account=", IntegerToString(login), " | Server=", brokerServer, " | Balance=$", DoubleToString(balance, 2), " | Equity=$", DoubleToString(equity, 2));
+      return(true);
+   }
+   else
+   {
+      Print("[HEARTBEAT ERROR] HTTP=", httpStatus, " Response=", response);
+      return(false);
+   }
 }
 
 //+------------------------------------------------------------------+
