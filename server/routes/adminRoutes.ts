@@ -358,73 +358,6 @@ adminRouter.patch('/mt5/accounts/:accountNumber/processing', requireAdmin, async
     return res.status(500).json({ success: false, message: 'Gagal memperbarui status processing akun MT5.' });
   }
 });
-/**
- * POST /api/admin/mt5/accounts/:accountNumber/reset-worker
- * Admin-only: Reset worker binding.
- * The next valid MT5 heartbeat will bind the account to the new worker.
- */
-adminRouter.post('/mt5/accounts/:accountNumber/reset-worker', requireAdmin, async (req, res) => {
-  try {
-    const accountNumber = String(req.params.accountNumber || '').trim();
-
-    if (!accountNumber) {
-      return res.status(400).json({
-        success: false,
-        code: 'INVALID_ACCOUNT_NUMBER',
-        message: 'Nomor akun MT5 wajib diisi.',
-      });
-    }
-
-    const account = await prisma.tradingAccount.findUnique({
-      where: { accountNumber },
-    });
-
-    if (!account) {
-      return res.status(404).json({
-        success: false,
-        code: 'TRADING_ACCOUNT_NOT_FOUND',
-        message: 'Akun trading MT5 tidak ditemukan.',
-      });
-    }
-
-    const updated = await prisma.tradingAccount.update({
-      where: { accountNumber },
-      data: {
-        workerId: null,
-        workerOnline: false,
-        lastHeartbeat: null,
-      },
-    });
-
-    // Return account to provisioning state
-    processingAccounts.add(accountNumber);
-
-    console.log(
-      `[ADMIN MT5 WORKER RESET] Admin=${(req as any).currentUser?.email} Account=${accountNumber}`
-    );
-
-    return res.json({
-      success: true,
-      code: 'WORKER_BINDING_RESET',
-      message: `Worker akun ${accountNumber} berhasil di-reset. Heartbeat MT5 berikutnya akan mengikat Worker ID baru.`,
-      account: {
-        accountNumber: updated.accountNumber,
-        workerId: null,
-        workerOnline: false,
-        lastHeartbeat: null,
-        executionEnabled: updated.executionEnabled,
-      },
-    });
-  } catch (error: any) {
-    console.error('[Admin MT5 Worker Reset Error]', error);
-
-    return res.status(500).json({
-      success: false,
-      code: 'INTERNAL_ERROR',
-      message: 'Gagal mereset worker MT5.',
-    });
-  }
-});
 
 /**
  * POST /api/admin/mt5/accounts/:accountNumber/reveal-credential
@@ -521,6 +454,76 @@ adminRouter.delete('/mt5/accounts/:accountNumber', requireAdmin, async (req, res
   } catch (error: any) {
     console.error('[Admin Delete MT5 Account Error]', error);
     return res.status(500).json({ success: false, message: 'Gagal menghapus akun trading MT5.' });
+  }
+});
+
+/**
+ * POST /api/admin/mt5/accounts/:accountNumber/reset-worker
+ * Admin action: Resets worker binding (workerId, workerOnline, lastHeartbeat) for an MT5 account.
+ * Allows the next valid heartbeat for this account to bind a new workerId.
+ * Protects currently ONLINE accounts unless force = true.
+ * Preserves user ownership, credentials, execution status, and all account data.
+ */
+adminRouter.post('/mt5/accounts/:accountNumber/reset-worker', requireAdmin, async (req, res) => {
+  try {
+    const accountNumber = String(req.params.accountNumber || '').trim();
+    const { force } = req.body || {};
+
+    if (!accountNumber) {
+      return res.status(400).json({ success: false, message: 'Nomor akun MT5 wajib diisi.' });
+    }
+
+    const account = await prisma.tradingAccount.findUnique({
+      where: { accountNumber },
+    });
+
+    if (!account) {
+      return res.status(404).json({ success: false, message: 'Akun trading MT5 tidak ditemukan.' });
+    }
+
+    const isOnline = isWorkerOnline(account.lastHeartbeat);
+    if (isOnline && !force) {
+      return res.status(400).json({
+        success: false,
+        code: 'ACCOUNT_CURRENTLY_ONLINE',
+        message:
+          'Akun sedang ONLINE dengan heartbeat aktif. Gunakan konfirmasi force reset jika ingin memutus paksa binding worker saat ini.',
+        requireForceConfirmation: true,
+      });
+    }
+
+    const previousWorkerId = account.workerId;
+
+    const updatedAccount = await prisma.tradingAccount.update({
+      where: { accountNumber },
+      data: {
+        workerId: null,
+        workerOnline: false,
+        lastHeartbeat: null,
+      },
+    });
+
+    console.log(
+      `[ADMIN MT5 WORKER RESET] Admin=${(req as any).currentUser?.email} Account=${accountNumber} PreviousWorker=${previousWorkerId || 'none'}`
+    );
+
+    return res.json({
+      success: true,
+      code: 'WORKER_RESET_SUCCESS',
+      message: `Binding worker untuk akun MT5 ${accountNumber} berhasil di-reset. Heartbeat EA berikutnya akan mengikat Worker ID baru.`,
+      account: {
+        id: updatedAccount.id,
+        accountNumber: updatedAccount.accountNumber,
+        broker: updatedAccount.broker,
+        brokerServer: updatedAccount.brokerServer,
+        workerId: null,
+        workerOnline: false,
+        lastHeartbeat: null,
+      },
+    });
+  } catch (error: any) {
+    console.error('[Admin Reset MT5 Worker Error]', error);
+    return res.status(500).json({ success: false, message: 'Gagal mereset binding worker MT5.' });
   }
 });
 

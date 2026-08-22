@@ -363,12 +363,16 @@ mt5WorkerRouter.post('/heartbeat', async (req, res) => {
 
     // 3. Worker Ownership Security Check
     // If account already has a worker assigned and it's different from the heartbeat worker, reject
-    if (account.workerId && account.workerId.trim() !== trimmedWorkerId) {
+    if (account.workerId && account.workerId.trim() !== '' && account.workerId.trim() !== trimmedWorkerId) {
       return res.status(403).json({
         success: false,
         code: 'WORKER_MISMATCH',
         message: 'This trading account is assigned to another worker',
       });
+    }
+
+    if (!account.workerId) {
+      console.log(`[MT5 WORKER BOUND] Account=${trimmedAccountNumber} BoundToWorker=${trimmedWorkerId}`);
     }
 
     // 4. Prepare update data for valid heartbeat

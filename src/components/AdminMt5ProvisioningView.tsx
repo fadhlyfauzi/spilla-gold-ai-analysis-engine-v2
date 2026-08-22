@@ -32,6 +32,7 @@ import {
   X,
   PlayCircle,
   PauseCircle,
+  RotateCcw,
 } from 'lucide-react';
 import { AdminTradingAccountRecord, AdminMt5ProvisioningStats, Mt5ProvisioningStatus } from '../types';
 
@@ -56,6 +57,7 @@ export const AdminMt5ProvisioningView: React.FC<AdminMt5ProvisioningViewProps> =
   const [selectedAccount, setSelectedAccount] = useState<AdminTradingAccountRecord | null>(null);
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [isUpdatingProcessing, setIsUpdatingProcessing] = useState<string | null>(null);
+  const [isResettingWorker, setIsResettingWorker] = useState<string | null>(null);
 
   // Credential Reveal State
   const [revealedPasswords, setRevealedPasswords] = useState<Record<string, string>>({});
@@ -146,7 +148,7 @@ export const AdminMt5ProvisioningView: React.FC<AdminMt5ProvisioningViewProps> =
     const isCurrentlyProcessing = currentStatus === 'PROCESSING';
     try {
       const res = await fetch(`/api/admin/mt5/accounts/${accountNumber}/processing`, {
-        method: 'POST',
+        method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${authToken}`,
@@ -166,43 +168,55 @@ export const AdminMt5ProvisioningView: React.FC<AdminMt5ProvisioningViewProps> =
       setIsUpdatingProcessing(null);
     }
   };
-// Reset Worker Assignment
-const handleResetWorker = async (accountNumber: string) => {
-  const confirmed = window.confirm(
-    `RESET WORKER MT5\n\nAkun: ${accountNumber}\n\nWorker ID lama akan dilepas agar EA yang sedang aktif dapat mendaftarkan Worker ID baru melalui heartbeat berikutnya.\n\nLanjutkan?`
-  );
 
-  if (!confirmed) return;
+  // Reset Worker Binding Handler
+  const handleResetWorker = async (accountNumber: string, isOnline: boolean, currentWorkerId?: string | null) => {
+    let confirmPrompt = `Reset current worker binding for account ${accountNumber}?\n\nThe next valid MT5 heartbeat will bind the account to a new worker.`;
+    if (isOnline) {
+      confirmPrompt = `PERINGATAN FORCE RESET:\nAkun ${accountNumber} saat ini berstatus ONLINE dengan worker ${currentWorkerId || '-'}.\n\nApakah Anda yakin ingin melakukan FORCE RESET worker binding?`;
+    }
 
-  try {
-    const res = await fetch(
-      `/api/admin/mt5/accounts/${accountNumber}/reset-worker`,
-      {
-        method: 'PATCH',
+    if (!window.confirm(confirmPrompt)) {
+      return;
+    }
+
+    setIsResettingWorker(accountNumber);
+    try {
+      const res = await fetch(`/api/admin/mt5/accounts/${accountNumber}/reset-worker`, {
+        method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${authToken}`,
         },
+        body: JSON.stringify({ force: isOnline }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setActionMessage(data.message || `Worker binding untuk akun ${accountNumber} berhasil di-reset.`);
+        if (selectedAccount?.accountNumber === accountNumber) {
+          setSelectedAccount((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  workerId: null,
+                  workerOnline: false,
+                  lastHeartbeat: null,
+                  lastHeartbeatAgeSeconds: null,
+                  status: prev.isProcessing ? 'PROCESSING' : 'WAITING FOR MT5',
+                }
+              : null
+          );
+        }
+        fetchAccounts(false);
+      } else {
+        alert(data.message || 'Gagal mereset worker binding.');
       }
-    );
-
-    const data = await res.json();
-
-    if (data.success) {
-      setActionMessage(
-        data.message ||
-          `Worker akun ${accountNumber} berhasil di-reset. Menunggu heartbeat EA.`
-      );
-
-      await fetchAccounts(false);
-    } else {
-      alert(data.message || 'Gagal mereset Worker ID.');
+    } catch (err: any) {
+      alert('Terjadi kesalahan saat mereset worker binding.');
+    } finally {
+      setIsResettingWorker(null);
     }
-  } catch (err) {
-    console.error('[RESET WORKER ERROR]', err);
-    alert('Terjadi kesalahan saat mereset Worker ID.');
-  }
-};
+  };
 
   // Delete / Disconnect Account
   const handleDeleteAccount = async (accountNumber: string, broker: string) => {
@@ -687,6 +701,31 @@ const handleResetWorker = async (accountNumber: string) => {
                             <span>Detail</span>
                           </button>
 
+                          {/* Reset Worker Binding Button */}
+                          <button
+                            onClick={() => handleResetWorker(acc.accountNumber, isOnline, acc.workerId)}
+                            disabled={isResettingWorker === acc.accountNumber || !acc.workerId}
+                            className={`px-2 py-1 rounded-lg border text-[10px] font-bold transition-all flex items-center gap-1 cursor-pointer ${
+                              acc.workerId
+                                ? isOnline
+                                  ? 'bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border-amber-500/30'
+                                  : 'bg-blue-500/10 hover:bg-blue-500/20 text-blue-300 border-blue-500/30'
+                                : 'bg-gray-800/40 text-gray-600 border-gray-800 cursor-not-allowed opacity-40'
+                            }`}
+                            title={
+                              acc.workerId
+                                ? isOnline
+                                  ? 'Force Reset Worker binding saat ini (sedang ONLINE)'
+                                  : `Reset binding worker (${acc.workerId}) agar bisa rebind worker baru`
+                                : 'Akun belum terikat ke worker manapun'
+                            }
+                          >
+                            <RotateCcw
+                              className={`w-3 h-3 ${isResettingWorker === acc.accountNumber ? 'animate-spin text-[#E5B842]' : ''}`}
+                            />
+                            <span>Reset Worker</span>
+                          </button>
+
                           {/* Toggle Processing Button */}
                           {!isOnline && (
                             <button
@@ -929,6 +968,64 @@ const handleResetWorker = async (accountNumber: string) => {
                         )}
                       </button>
                     )}
+                  </div>
+                </div>
+
+                {/* Worker Binding Management Card */}
+                <div className="p-3.5 bg-[#0B0E14] border border-blue-500/30 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-1.5">
+                      <Cpu className="w-3.5 h-3.5 text-blue-400" />
+                      <span className="text-[10px] font-bold text-blue-400 uppercase tracking-wide">
+                        MT5 WORKER BINDING & REBIND
+                      </span>
+                    </div>
+                    <div className="mt-1 font-mono text-xs text-gray-300">
+                      {selectedAccount.workerId ? (
+                        <div className="flex items-center gap-2">
+                          <span className="text-[#E5B842] font-black bg-[#141822] px-2.5 py-1 rounded border border-gray-700">
+                            {selectedAccount.workerId}
+                          </span>
+                          <span className="text-[10px] text-gray-400">
+                            {selectedAccount.status === 'ONLINE' ? '• Status ONLINE' : '• Stored Worker ID'}
+                          </span>
+                        </div>
+                      ) : (
+                        <span className="text-gray-500 italic text-[11px]">Belum terikat ke Worker ID manapun</span>
+                      )}
+                    </div>
+                    <p className="text-[10px] text-gray-400 mt-1 font-sans">
+                      Jika EA salah input Worker ID saat setup, klik Reset Worker. Detak (heartbeat) valid berikutnya dari EA akan otomatis mengikat Worker ID baru.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      onClick={() =>
+                        handleResetWorker(
+                          selectedAccount.accountNumber,
+                          selectedAccount.status === 'ONLINE',
+                          selectedAccount.workerId
+                        )
+                      }
+                      disabled={
+                        isResettingWorker === selectedAccount.accountNumber || !selectedAccount.workerId
+                      }
+                      className={`px-3.5 py-2 rounded-xl border text-[11px] font-bold transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
+                        selectedAccount.status === 'ONLINE'
+                          ? 'bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border-amber-500/40'
+                          : 'bg-blue-500/15 hover:bg-blue-500/25 text-blue-300 border-blue-500/40'
+                      }`}
+                    >
+                      <RotateCcw
+                        className={`w-3.5 h-3.5 ${
+                          isResettingWorker === selectedAccount.accountNumber ? 'animate-spin' : ''
+                        }`}
+                      />
+                      <span>
+                        {selectedAccount.status === 'ONLINE' ? 'FORCE RESET WORKER' : 'RESET WORKER BINDING'}
+                      </span>
+                    </button>
                   </div>
                 </div>
               </div>
