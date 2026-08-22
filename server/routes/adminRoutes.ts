@@ -358,6 +358,73 @@ adminRouter.patch('/mt5/accounts/:accountNumber/processing', requireAdmin, async
     return res.status(500).json({ success: false, message: 'Gagal memperbarui status processing akun MT5.' });
   }
 });
+/**
+ * POST /api/admin/mt5/accounts/:accountNumber/reset-worker
+ * Admin-only: Reset worker binding.
+ * The next valid MT5 heartbeat will bind the account to the new worker.
+ */
+adminRouter.post('/mt5/accounts/:accountNumber/reset-worker', requireAdmin, async (req, res) => {
+  try {
+    const accountNumber = String(req.params.accountNumber || '').trim();
+
+    if (!accountNumber) {
+      return res.status(400).json({
+        success: false,
+        code: 'INVALID_ACCOUNT_NUMBER',
+        message: 'Nomor akun MT5 wajib diisi.',
+      });
+    }
+
+    const account = await prisma.tradingAccount.findUnique({
+      where: { accountNumber },
+    });
+
+    if (!account) {
+      return res.status(404).json({
+        success: false,
+        code: 'TRADING_ACCOUNT_NOT_FOUND',
+        message: 'Akun trading MT5 tidak ditemukan.',
+      });
+    }
+
+    const updated = await prisma.tradingAccount.update({
+      where: { accountNumber },
+      data: {
+        workerId: null,
+        workerOnline: false,
+        lastHeartbeat: null,
+      },
+    });
+
+    // Return account to provisioning state
+    processingAccounts.add(accountNumber);
+
+    console.log(
+      `[ADMIN MT5 WORKER RESET] Admin=${(req as any).currentUser?.email} Account=${accountNumber}`
+    );
+
+    return res.json({
+      success: true,
+      code: 'WORKER_BINDING_RESET',
+      message: `Worker akun ${accountNumber} berhasil di-reset. Heartbeat MT5 berikutnya akan mengikat Worker ID baru.`,
+      account: {
+        accountNumber: updated.accountNumber,
+        workerId: null,
+        workerOnline: false,
+        lastHeartbeat: null,
+        executionEnabled: updated.executionEnabled,
+      },
+    });
+  } catch (error: any) {
+    console.error('[Admin MT5 Worker Reset Error]', error);
+
+    return res.status(500).json({
+      success: false,
+      code: 'INTERNAL_ERROR',
+      message: 'Gagal mereset worker MT5.',
+    });
+  }
+});
 
 /**
  * POST /api/admin/mt5/accounts/:accountNumber/reveal-credential

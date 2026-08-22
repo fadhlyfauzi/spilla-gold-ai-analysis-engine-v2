@@ -146,7 +146,7 @@ export const AdminMt5ProvisioningView: React.FC<AdminMt5ProvisioningViewProps> =
     const isCurrentlyProcessing = currentStatus === 'PROCESSING';
     try {
       const res = await fetch(`/api/admin/mt5/accounts/${accountNumber}/processing`, {
-        method: 'PATCH',
+        method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${authToken}`,
@@ -166,6 +166,43 @@ export const AdminMt5ProvisioningView: React.FC<AdminMt5ProvisioningViewProps> =
       setIsUpdatingProcessing(null);
     }
   };
+// Reset Worker Assignment
+const handleResetWorker = async (accountNumber: string) => {
+  const confirmed = window.confirm(
+    `RESET WORKER MT5\n\nAkun: ${accountNumber}\n\nWorker ID lama akan dilepas agar EA yang sedang aktif dapat mendaftarkan Worker ID baru melalui heartbeat berikutnya.\n\nLanjutkan?`
+  );
+
+  if (!confirmed) return;
+
+  try {
+    const res = await fetch(
+      `/api/admin/mt5/accounts/${accountNumber}/reset-worker`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authToken}`,
+        },
+      }
+    );
+
+    const data = await res.json();
+
+    if (data.success) {
+      setActionMessage(
+        data.message ||
+          `Worker akun ${accountNumber} berhasil di-reset. Menunggu heartbeat EA.`
+      );
+
+      await fetchAccounts(false);
+    } else {
+      alert(data.message || 'Gagal mereset Worker ID.');
+    }
+  } catch (err) {
+    console.error('[RESET WORKER ERROR]', err);
+    alert('Terjadi kesalahan saat mereset Worker ID.');
+  }
+};
 
   // Delete / Disconnect Account
   const handleDeleteAccount = async (accountNumber: string, broker: string) => {
