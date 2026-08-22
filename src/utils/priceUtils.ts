@@ -12,22 +12,22 @@ export function normalizeCentPrice(price: number | undefined | null, symbol: str
   if (price === undefined || price === null || isNaN(price)) return 0;
   const sym = (symbol || 'XAUUSD').trim().toLowerCase();
   
-  // Non-cent majors must NEVER be converted
-  const isMajorStandard =
+  // Crypto, Forex, and Standard symbols must NEVER have cent division applied
+  if (
     sym.includes('btc') ||
+    sym.includes('crypto') ||
     sym.includes('eur') ||
     sym.includes('gbp') ||
     sym.includes('jpy') ||
-    sym === 'xauusd' ||
-    sym === 'gold';
-
-  if (isMajorStandard) {
+    sym.includes('usd') && !sym.includes('cent') && !sym.endsWith('.c')
+  ) {
     return Number(price);
   }
 
-  const isCentSymbol = sym.includes('.cent') || sym.endsWith('.c') || sym.includes('cent');
+  // Cent scaling only applies to Gold/XAU cent symbols (e.g. XAUUSD.cent, GOLD.c) where price is reported in cents (>10000)
+  const isGoldCentSymbol = (sym.includes('xau') || sym.includes('gold')) && (sym.includes('.cent') || sym.endsWith('.c') || sym.includes('cent'));
   
-  if (isCentSymbol && price > 10000) {
+  if (isGoldCentSymbol && price > 10000) {
     return Number((price / 100).toFixed(2));
   }
   return Number(price);

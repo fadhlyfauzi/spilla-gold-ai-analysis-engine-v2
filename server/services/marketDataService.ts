@@ -468,31 +468,43 @@ class MarketDataService {
 
   /**
    * Calculates mathematically consistent dynamic trade plan levels from a live anchor price.
-   * Preserves exact Risk:Reward ratio (1 : 1.57) and continuous tracking.
+   * Preserves exact Risk:Reward ratio (1 : 1.57) and continuous tracking across all symbols.
    */
   public calculateDynamicExecutionLevels(
     anchorPrice: number,
     action: 'BUY' | 'SELL' | 'NONE' = 'BUY',
-    riskDist = 17.02,
+    riskDist?: number,
     rrRatio = 1.57,
     digits = 2
   ) {
+    const isCrypto = anchorPrice > 10000;
+    const isForex = digits === 5 || digits === 3;
+    const defaultRiskDist = isCrypto
+      ? 650.0
+      : isForex
+      ? (digits === 3 ? 0.45 : 0.0035)
+      : 17.02;
+
+    let effectiveRiskDist = (riskDist && riskDist > 0 && riskDist < anchorPrice * 0.3)
+      ? riskDist
+      : defaultRiskDist;
+
     const isSell = action === 'SELL';
     const entry = Number(anchorPrice.toFixed(digits));
     const sl = isSell
-      ? Number((entry + riskDist).toFixed(digits))
-      : Number((entry - riskDist).toFixed(digits));
+      ? Number((entry + effectiveRiskDist).toFixed(digits))
+      : Number((entry - effectiveRiskDist).toFixed(digits));
     
     // Constant risk reward multipliers
     const tp1 = isSell
-      ? Number((entry - Number((riskDist * 1.5652).toFixed(2))).toFixed(digits))
-      : Number((entry + Number((riskDist * 1.5652).toFixed(2))).toFixed(digits));
+      ? Number((entry - effectiveRiskDist * 1.5652).toFixed(digits))
+      : Number((entry + effectiveRiskDist * 1.5652).toFixed(digits));
     const tp2 = isSell
-      ? Number((entry - Number((riskDist * 2.7826).toFixed(2))).toFixed(digits))
-      : Number((entry + Number((riskDist * 2.7826).toFixed(2))).toFixed(digits));
+      ? Number((entry - effectiveRiskDist * 2.7826).toFixed(digits))
+      : Number((entry + effectiveRiskDist * 2.7826).toFixed(digits));
     const tp3 = isSell
-      ? Number((entry - Number((riskDist * 4.0).toFixed(2))).toFixed(digits))
-      : Number((entry + Number((riskDist * 4.0).toFixed(2))).toFixed(digits));
+      ? Number((entry - effectiveRiskDist * 4.0).toFixed(digits))
+      : Number((entry + effectiveRiskDist * 4.0).toFixed(digits));
 
     return {
       entry_price: entry,
@@ -501,7 +513,7 @@ class MarketDataService {
       take_profit_2: tp2,
       take_profit_3: tp3,
       risk_reward_ratio: rrRatio,
-      risk_distance: riskDist,
+      risk_distance: effectiveRiskDist,
     };
   }
 

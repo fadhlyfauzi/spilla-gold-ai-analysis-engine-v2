@@ -110,24 +110,30 @@ export const createExecutionParametersFromSnapshot = (
 
   const isCrypto = currentSym.toUpperCase().includes('BTC');
   const isForex = specDigits === 5 || specDigits === 3;
-  const defaultRiskDist = isCrypto ? 650.0 : isForex ? (specDigits === 3 ? 0.45 : 0.0035) : 17.02;
+  const defaultRiskDist = isCrypto ? (style === 'SCALPING' ? 450.0 : 650.0) : isForex ? (specDigits === 3 ? 0.45 : 0.0035) : 17.02;
   const rawRiskDist = Number(snap.risk_distance);
-  const riskDist = (rawRiskDist > 0 && rawRiskDist < entry * 0.5) ? rawRiskDist : defaultRiskDist;
+  const riskDist = (rawRiskDist > 0 && rawRiskDist < entry * 0.3) ? rawRiskDist : defaultRiskDist;
 
   let rawSl = plan.stop_loss ? Number(plan.stop_loss) : 0;
-  if (!rawSl || isNaN(rawSl) || rawSl <= 0) {
+  const isSlOffScale = !rawSl || isNaN(rawSl) || rawSl <= 0 || rawSl < entry * 0.6 || rawSl > entry * 1.4;
+  const isSlWrongSide = side === 'BUY' ? rawSl >= entry : rawSl <= entry;
+  if (isSlOffScale || isSlWrongSide) {
     rawSl = side === 'SELL' ? entry + riskDist : entry - riskDist;
   }
   const sl = Number(Math.max(0.0001, rawSl).toFixed(specDigits));
 
   let rawTp1 = plan.take_profit_1 ? Number(plan.take_profit_1) : 0;
-  if (!rawTp1 || isNaN(rawTp1) || rawTp1 <= 0) {
+  const isTp1OffScale = !rawTp1 || isNaN(rawTp1) || rawTp1 <= 0 || rawTp1 < entry * 0.6 || rawTp1 > entry * 1.4;
+  const isTp1WrongSide = side === 'BUY' ? rawTp1 <= entry : rawTp1 >= entry;
+  if (isTp1OffScale || isTp1WrongSide) {
     rawTp1 = side === 'SELL' ? entry - riskDist * 1.57 : entry + riskDist * 1.57;
   }
   const tp1 = Number(Math.max(0.0001, rawTp1).toFixed(specDigits));
 
   let rawTp2: number | null = plan.take_profit_2 ? Number(plan.take_profit_2) : null;
-  if (!rawTp2 || isNaN(rawTp2) || rawTp2 <= 0) {
+  const isTp2OffScale = rawTp2 !== null && (!rawTp2 || isNaN(rawTp2) || rawTp2 <= 0 || rawTp2 < entry * 0.6 || rawTp2 > entry * 1.4);
+  const isTp2WrongSide = rawTp2 !== null && (side === 'BUY' ? rawTp2 <= tp1 : rawTp2 >= tp1);
+  if (isTp2OffScale || isTp2WrongSide || rawTp2 === null) {
     rawTp2 = side === 'SELL' ? entry - riskDist * 2.8 : entry + riskDist * 2.8;
   }
   const tp2 = Number(Math.max(0.0001, rawTp2).toFixed(specDigits));
@@ -959,7 +965,10 @@ export const LiveAnalysisView: React.FC<LiveAnalysisViewProps> = ({
       if (params.side !== actionToExecute) {
         const entry = params.entryPrice;
         const isTargetSell = actionToExecute === 'SELL';
-        const riskDistance = Math.abs(params.stopLoss - entry) || 17.02;
+        const isCrypto = selectedSymbol.toUpperCase().includes('BTC');
+        const defaultRiskDist = isCrypto ? (tradingStyle === 'SCALPING' ? 450.0 : 650.0) : (currentSymbolSpec.digits === 5 ? 0.0035 : currentSymbolSpec.digits === 3 ? 0.45 : 17.02);
+        const calculatedRisk = Math.abs(params.stopLoss - entry);
+        const riskDistance = (calculatedRisk > 0 && calculatedRisk < entry * 0.3) ? calculatedRisk : defaultRiskDist;
         const digits = currentSymbolSpec.digits || 2;
         const newSL = Number((isTargetSell ? entry + riskDistance : entry - riskDistance).toFixed(digits));
         const newTP1 = Number((isTargetSell ? entry - riskDistance * 1.57 : entry + riskDistance * 1.57).toFixed(digits));

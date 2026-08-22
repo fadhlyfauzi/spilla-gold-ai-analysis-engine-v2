@@ -275,7 +275,7 @@ export class TechnicalEngine {
       for (let i = 1; i < n; i++) {
         ema = closes[i] * k + ema * (1 - k);
       }
-      return Number(ema.toFixed(2));
+      return Number(ema.toFixed(digits));
     };
 
     // 1. EMA Ribbon
@@ -357,11 +357,11 @@ export class TechnicalEngine {
     if (isInc('MACD')) {
       const ema12 = calculateEma(12);
       const ema26 = calculateEma(26);
-      const macdLine = Number((ema12 - ema26).toFixed(2));
-      const signalLine = Number((macdLine * 0.82).toFixed(2));
-      const histogram = Number((macdLine - signalLine).toFixed(2));
+      const macdLine = Number((ema12 - ema26).toFixed(digits));
+      const signalLine = Number((macdLine * 0.82).toFixed(digits));
+      const histogram = Number((macdLine - signalLine).toFixed(digits));
       const macdSignal: SentimentType = macdLine > signalLine && histogram > 0 ? 'BULLISH' : macdLine < signalLine && histogram < 0 ? 'BEARISH' : 'NEUTRAL';
-      const crossover = macdLine > signalLine ? (histogram > 1 ? 'BULLISH_EXPANSION' : 'BULLISH_CROSSOVER') : (histogram < -1 ? 'BEARISH_EXPANSION' : 'BEARISH_CROSSOVER');
+      const crossover = macdLine > signalLine ? (histogram > 0.05 * currentPrice ? 'BULLISH_EXPANSION' : 'BULLISH_CROSSOVER') : (histogram < -0.05 * currentPrice ? 'BEARISH_EXPANSION' : 'BEARISH_CROSSOVER');
       macdResult = {
         macdLine,
         signalLine,
@@ -374,7 +374,12 @@ export class TechnicalEngine {
     // 4. ATR 14
     let atrResult = undefined;
     if (isInc('ATR')) {
-      let atr14 = 14.80;
+      const defaultAtrForSym = isCrypto
+        ? Math.max(450.0, currentPrice * 0.0085)
+        : isForex
+        ? (digits === 3 ? 0.45 : 0.0035)
+        : 14.80;
+      let atr14 = defaultAtrForSym;
       if (n >= 15) {
         let trSum = 0;
         for (let i = n - 14; i < n; i++) {
@@ -384,14 +389,21 @@ export class TechnicalEngine {
           const tr = Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose));
           trSum += tr;
         }
-        atr14 = Number((trSum / 14).toFixed(2));
+        const calcAtr = Number((trSum / 14).toFixed(digits));
+        if (calcAtr > 0 && calcAtr < currentPrice * 0.5) {
+          atr14 = calcAtr;
+        }
       }
-      const volatilityCondition = atr14 > 25 ? 'HIGH' : atr14 > 18 ? 'ELEVATED' : atr14 < 8 ? 'LOW' : 'NORMAL';
+      const volatilityCondition = isCrypto
+        ? (atr14 > 1200 ? 'HIGH' : atr14 > 800 ? 'ELEVATED' : atr14 < 300 ? 'LOW' : 'NORMAL')
+        : isForex
+        ? (atr14 > defaultAtrForSym * 1.5 ? 'HIGH' : atr14 < defaultAtrForSym * 0.6 ? 'LOW' : 'NORMAL')
+        : (atr14 > 25 ? 'HIGH' : atr14 > 18 ? 'ELEVATED' : atr14 < 8 ? 'LOW' : 'NORMAL');
       const slMultiplier = tradingStyle === 'SCALPING' ? 1.25 : 1.15;
       atrResult = {
         value: atr14,
         volatilityCondition,
-        suggestedSlBuffer: Number((atr14 * slMultiplier).toFixed(2)),
+        suggestedSlBuffer: Number((atr14 * slMultiplier).toFixed(digits)),
       };
     }
 
@@ -594,28 +606,29 @@ export class TechnicalEngine {
     const getTfStructure = (candles: any[], tfDefaultAtr: number) => {
       const cHighs = candles.map((c) => c.high);
       const cLows = candles.map((c) => c.low);
-      const sHigh = Number((Math.max(...cHighs.slice(-20)) || currentPrice + tfDefaultAtr * 1.5).toFixed(2));
-      const sLow = Number((Math.min(...cLows.slice(-20)) || currentPrice - tfDefaultAtr * 1.5).toFixed(2));
-      const res1 = Number((Math.max(...cHighs.slice(-10)) || currentPrice + tfDefaultAtr).toFixed(2));
-      const res2 = Number((res1 + tfDefaultAtr * 0.8).toFixed(2));
-      const sup1 = Number((Math.min(...cLows.slice(-10)) || currentPrice - tfDefaultAtr).toFixed(2));
-      const sup2 = Number((sup1 - tfDefaultAtr * 0.8).toFixed(2));
+      const sHigh = Number((Math.max(...cHighs.slice(-20)) || currentPrice + tfDefaultAtr * 1.5).toFixed(digits));
+      const sLow = Number((Math.min(...cLows.slice(-20)) || currentPrice - tfDefaultAtr * 1.5).toFixed(digits));
+      const res1 = Number((Math.max(...cHighs.slice(-10)) || currentPrice + tfDefaultAtr).toFixed(digits));
+      const res2 = Number((res1 + tfDefaultAtr * 0.8).toFixed(digits));
+      const sup1 = Number((Math.min(...cLows.slice(-10)) || currentPrice - tfDefaultAtr).toFixed(digits));
+      const sup2 = Number((sup1 - tfDefaultAtr * 0.8).toFixed(digits));
       return {
-        swingHigh: sHigh,
-        swingLow: sLow,
-        resistance: [res1, res2],
-        support: [sup1, sup2],
+        swingHigh: (sHigh > currentPrice * 0.5 && sHigh < currentPrice * 1.5) ? sHigh : Number((currentPrice + tfDefaultAtr * 1.5).toFixed(digits)),
+        swingLow: (sLow > currentPrice * 0.5 && sLow < currentPrice * 1.5) ? sLow : Number((currentPrice - tfDefaultAtr * 1.5).toFixed(digits)),
+        resistance: [(res1 > currentPrice * 0.5 && res1 < currentPrice * 1.5) ? res1 : Number((currentPrice + tfDefaultAtr).toFixed(digits)), (res2 > currentPrice * 0.5 && res2 < currentPrice * 1.5) ? res2 : Number((currentPrice + tfDefaultAtr * 1.8).toFixed(digits))],
+        support: [(sup1 > currentPrice * 0.5 && sup1 < currentPrice * 1.5) ? sup1 : Number((currentPrice - tfDefaultAtr).toFixed(digits)), (sup2 > currentPrice * 0.5 && sup2 < currentPrice * 1.5) ? sup2 : Number((currentPrice - tfDefaultAtr * 1.8).toFixed(digits))],
       };
     };
 
-    const d1Struct = getTfStructure(candlesD1, 24.5);
-    const h4Struct = getTfStructure(candlesH4, 16.2);
-    const h1Struct = getTfStructure(candlesH1, 9.8);
-    const m30Struct = getTfStructure(candlesM30, 6.2);
-    const m15Struct = getTfStructure(candlesM15, 3.8);
-    const m10Struct = getTfStructure(candlesM10, 2.8);
-    const m5Struct = getTfStructure(candlesM5, 1.8);
-    const m1Struct = getTfStructure(candlesM1, 0.9);
+    const tfScaleFactor = isCrypto ? Math.max(10.0, currentPrice / 150.0) : isForex ? (digits === 3 ? 0.03 : 0.00025) : 1.0;
+    const d1Struct = getTfStructure(candlesD1, 24.5 * tfScaleFactor);
+    const h4Struct = getTfStructure(candlesH4, 16.2 * tfScaleFactor);
+    const h1Struct = getTfStructure(candlesH1, 9.8 * tfScaleFactor);
+    const m30Struct = getTfStructure(candlesM30, 6.2 * tfScaleFactor);
+    const m15Struct = getTfStructure(candlesM15, 3.8 * tfScaleFactor);
+    const m10Struct = getTfStructure(candlesM10, 2.8 * tfScaleFactor);
+    const m5Struct = getTfStructure(candlesM5, 1.8 * tfScaleFactor);
+    const m1Struct = getTfStructure(candlesM1, 0.9 * tfScaleFactor);
 
     const d1Trend: 'BULLISH' | 'BEARISH' | 'RANGE' = currentPrice > calculateEma(200) ? 'BULLISH' : 'BEARISH';
     const h4Trend: 'BULLISH' | 'BEARISH' | 'RANGE' = currentPrice > calculateEma(100) ? 'BULLISH' : 'BEARISH';

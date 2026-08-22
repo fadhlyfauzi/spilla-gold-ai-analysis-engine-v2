@@ -505,21 +505,23 @@ export class CopilotService {
           `==================================================`
         );
 
+        const isCrypto = (ctx.symbol || '').toUpperCase().includes('BTC');
+        const isForex = ctx.spec?.category === 'FOREX' || ctx.spec?.digits === 5 || ctx.spec?.digits === 3;
         const styleInstructions = tradingStyle === 'SCALPING'
           ? `TRADING STYLE: SCALPING (FAST-PACED MICROSTRUCTURE EXECUTION)
 - Primary Execution Timeframe: ${primaryTimeframe} (M1 / M5 / M15). High-precision micro triggers.
 - Higher Timeframe Context: H1 / H4 background baseline.
 - Focus: Fast price velocity, immediate candle wick rejections, M1/M5/M15 EMA slope, VWAP bounce/break.
-- Stop Loss & Take Profit: Microstructure/ATR-based tight invalidation (Gold SL typically $1.50 to $4.00, TP1 $2.50 to $6.00, TP2 $5.00 to $12.00, Min R:R 1:1.2).
+- Stop Loss & Take Profit: Microstructure/ATR-based tight invalidation (${isCrypto ? 'BTC SL typically $350 to $800, TP1 $550 to $1200, TP2 $1000 to $2500' : isForex ? 'Forex SL typically 15 to 35 pips, TP1 25 to 50 pips' : 'Gold SL typically $1.50 to $4.00, TP1 $2.50 to $6.00, TP2 $5.00 to $12.00'}, Min R:R 1:1.2).
 - Confirmation Requirements: Fast micro candle rejection and EMA/VWAP alignment.`
           : `TRADING STYLE: INTRADAY (SESSION STRUCTURE & SWING EXECUTION)
 - Primary Execution Timeframe: ${primaryTimeframe} (H4 / D1).
 - Higher Timeframe Context: H4 / D1 (D1 provides key market context and daily institutional bias).
 - Focus: Major S/R levels, daily/session liquidity, high-timeframe structure breaks.
-- Stop Loss & Take Profit: Session structure ATR-based invalidation (Gold SL typically $8.00 to $18.00, TP1 $12.00 to $28.00, TP2 $25.00 to $50.00, Min R:R 1:1.5).
+- Stop Loss & Take Profit: Session structure ATR-based invalidation (${isCrypto ? 'BTC SL typically $600 to $1500, TP1 $900 to $2500, TP2 $1800 to $4500' : isForex ? 'Forex SL typically 30 to 70 pips, TP1 50 to 120 pips' : 'Gold SL typically $8.00 to $18.00, TP1 $12.00 to $28.00, TP2 $25.00 to $50.00'}, Min R:R 1:1.5).
 - Confirmation Requirements: Multi-timeframe session candle close and structural validation.`;
 
-        const systemPrompt = `You are **SPILLA GOLD AI Trading Copilot**, the institutional-style XAUUSD execution decision engine.
+        const systemPrompt = `You are **SPILLA GOLD AI Trading Copilot**, the institutional-style ${ctx.symbol} execution decision engine.
 
 CRITICAL ARCHITECTURAL MANDATE: SELECTED TIMEFRAME & TRADING STYLE ARE THE PRIMARY GATES
 - Trading Style: ${tradingStyle}
@@ -535,7 +537,8 @@ STRICT LIVE PRICE & MULTI-TIMEFRAME GROUNDING RULES:
 1. SINGLE SOURCE OF TRUTH (LAST CAPTURED PRICE LINE):
    - The field "capturePrice" is the LAST PRICE LINE on the captured chart ($${price.toFixed(ctx.spec.digits || 2)}).
    - Carefully inspect the chart image: read the latest candlestick pattern, the position of the last price line, dynamic EMA ribbon, VWAP, and structural Support/Resistance levels directly on the chart.
-   - ALL prices in your recommendation (Potential Entry Zone, Stop Loss, TP1, TP2, Support, Resistance) MUST be strictly grounded to this last captured price ($${price.toFixed(2)}).
+   - ALL prices in your recommendation (Potential Entry Zone, Stop Loss, TP1, TP2, Support, Resistance) MUST be strictly grounded to this last captured price ($${price.toFixed(ctx.spec.digits || 2)}) and must use the exact same absolute price scale.
+   - For ${ctx.symbol} (around $${price.toFixed(ctx.spec.digits || 2)}), never generate target levels or TP/SL with offsets or cent scaling. Entry, Stop Loss, TP1, and TP2 MUST ALL be on the same scale around $${price.toFixed(ctx.spec.digits || 2)}.
    - NEVER use remembered, historical, example, cached, or static prices (e.g. 2653.30, 2656.00, 2300.00, 4351.20). Any numbers in instructions are examples only.
    - Any price disconnected from the chart's last captured price snapshot is a SYSTEM ERROR.
 
@@ -894,8 +897,7 @@ Return strictly JSON matching this structure:
           // Price Grounding and Validation against capture price regime
           const isPriceGrounded = (pVal: number) => {
             if (!pVal || isNaN(pVal) || pVal <= 0) return false;
-            const maxDeviation = Math.max(currentPrice * 0.10, atr * 5);
-            return Math.abs(pVal - currentPrice) <= maxDeviation;
+            return pVal >= currentPrice * 0.60 && pVal <= currentPrice * 1.40;
           };
 
           if (!isNoTrade) {
@@ -904,28 +906,41 @@ Return strictly JSON matching this structure:
             let parsedTp2 = Number(parsed.take_profit_2);
 
             const isSellDirection = potentialDir === 'SELL' || biasSignal === 'SELL';
+            const defaultRiskDist = isCrypto ? (isScalping ? 450.0 : 850.0) : isForex ? (ctx.spec.digits === 3 ? 0.45 : 0.0035) : (isScalping ? 4.50 : 14.80);
+            const validAtr = (atr > 0 && atr < currentPrice * 0.3) ? atr : defaultRiskDist;
 
             if (!isPriceGrounded(parsedSl)) {
               parsedSl = isSellDirection
-                ? futureEntryReference + (sc.supportResistance?.distToNearestResistance || atr * 1.15)
-                : futureEntryReference - (sc.supportResistance?.distToNearestSupport || atr * 1.15);
+                ? futureEntryReference + (sc.supportResistance?.distToNearestResistance || validAtr * 1.15)
+                : futureEntryReference - (sc.supportResistance?.distToNearestSupport || validAtr * 1.15);
             }
             if (!isPriceGrounded(parsedTp1)) {
               parsedTp1 = isSellDirection
-                ? futureEntryReference - atr * 1.8
-                : futureEntryReference + atr * 1.8;
+                ? futureEntryReference - validAtr * 1.8
+                : futureEntryReference + validAtr * 1.8;
             }
             if (!isPriceGrounded(parsedTp2)) {
               parsedTp2 = isSellDirection
-                ? futureEntryReference - atr * 3.2
-                : futureEntryReference + atr * 3.2;
+                ? futureEntryReference - validAtr * 3.2
+                : futureEntryReference + validAtr * 3.2;
+            }
+
+            // Directional & Scale Invariants
+            if (!isSellDirection) { // BUY
+              if (parsedSl >= futureEntryReference) parsedSl = futureEntryReference - validAtr * 1.15;
+              if (parsedTp1 <= futureEntryReference) parsedTp1 = futureEntryReference + validAtr * 1.8;
+              if (parsedTp2 <= parsedTp1) parsedTp2 = parsedTp1 + validAtr * 1.4;
+            } else { // SELL
+              if (parsedSl <= futureEntryReference) parsedSl = futureEntryReference + validAtr * 1.15;
+              if (parsedTp1 >= futureEntryReference) parsedTp1 = futureEntryReference - validAtr * 1.8;
+              if (parsedTp2 >= parsedTp1) parsedTp2 = parsedTp1 - validAtr * 1.4;
             }
 
             stopLoss = Number(parsedSl.toFixed(ctx.spec.digits));
             tp1 = Number(parsedTp1.toFixed(ctx.spec.digits));
             tp2 = Number(parsedTp2.toFixed(ctx.spec.digits));
 
-            const slDistance = Math.abs(futureEntryReference - stopLoss) || 1;
+            const slDistance = Math.abs(futureEntryReference - stopLoss) || validAtr;
             let tpDistance = Math.abs(tp1 - futureEntryReference);
             rr = Number((tpDistance / slDistance).toFixed(2));
 

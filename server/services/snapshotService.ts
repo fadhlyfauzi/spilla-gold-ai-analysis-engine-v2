@@ -197,7 +197,7 @@ class SnapshotService {
     const isCent = resolved.isCentAccount;
     const digits = resolved.spec.digits || 2;
     const rawPrice = snapshotData.currentPrice || marketDataService.getCurrentPrice(resolved.canonicalSymbol);
-    const normalizedPrice = (isCent && rawPrice > 10000) ? Number((rawPrice / 100).toFixed(digits)) : Number(rawPrice.toFixed(digits));
+    const normalizedPrice = (isCent && resolved.canonicalSymbol === 'XAUUSD' && rawPrice > 10000) ? Number((rawPrice / 100).toFixed(digits)) : Number(rawPrice.toFixed(digits));
 
     const newSnapshot: ChartSnapshot = {
       id: `snap-${Date.now()}`,
@@ -307,7 +307,7 @@ OUTPUT FORMAT (STRICT JSON SCHEMA ONLY):
     const aiClient = this.getGenAI();
     let result: MultimodalAnalysisResult | null = null;
 
-    const norm = (p: number) => ((isCent && p > 10000) ? Number((p / 100).toFixed(digits)) : Number(p.toFixed(digits)));
+    const norm = (p: number) => ((isCent && resolved.canonicalSymbol === 'XAUUSD' && p > 10000) ? Number((p / 100).toFixed(digits)) : Number(p.toFixed(digits)));
 
     if (aiClient && snapshot?.imageDataUrl && snapshot.imageDataUrl.startsWith('data:image/')) {
       try {

@@ -205,26 +205,26 @@ export const AiPanel: React.FC<AiPanelProps> = ({ data, onNavigateTo }) => {
         <div className="grid grid-cols-2 gap-2.5">
           <div className="bg-[#0B0E14] p-2.5 rounded-lg border border-gray-800">
             <span className="text-gray-500 text-[10px] block font-bold uppercase">Entry Price</span>
-            <span className="text-white font-black text-sm">${normalizeCentPrice(setup.entryPrice).toFixed(2)}</span>
+            <span className="text-white font-black text-sm">${normalizeCentPrice(setup.entryPrice, (data as any)?.symbol || 'XAUUSD').toFixed(2)}</span>
           </div>
           <div className="bg-[#0B0E14] p-2.5 rounded-lg border border-gray-800">
             <span className="text-rose-400/80 text-[10px] block font-bold uppercase">Stop Loss</span>
-            <span className="text-rose-400 font-black text-sm">${normalizeCentPrice(setup.stopLoss).toFixed(2)}</span>
+            <span className="text-rose-400 font-black text-sm">${normalizeCentPrice(setup.stopLoss, (data as any)?.symbol || 'XAUUSD').toFixed(2)}</span>
           </div>
         </div>
 
         <div className="space-y-1.5">
           <div className="flex justify-between items-center bg-[#0B0E14] p-2 rounded border border-gray-800">
             <span className="text-gray-400 text-[11px]">Take Profit 1:</span>
-            <span className="text-emerald-400 font-bold">${normalizeCentPrice(setup.takeProfit1).toFixed(2)}</span>
+            <span className="text-emerald-400 font-bold">${normalizeCentPrice(setup.takeProfit1, (data as any)?.symbol || 'XAUUSD').toFixed(2)}</span>
           </div>
           <div className="flex justify-between items-center bg-[#0B0E14] p-2 rounded border border-gray-800">
             <span className="text-gray-400 text-[11px]">Take Profit 2:</span>
-            <span className="text-emerald-400 font-bold">${normalizeCentPrice(setup.takeProfit2).toFixed(2)}</span>
+            <span className="text-emerald-400 font-bold">${normalizeCentPrice(setup.takeProfit2, (data as any)?.symbol || 'XAUUSD').toFixed(2)}</span>
           </div>
           <div className="flex justify-between items-center bg-[#0B0E14] p-2 rounded border border-gray-800">
             <span className="text-gray-400 text-[11px]">Take Profit 3:</span>
-            <span className="text-emerald-400 font-bold">${normalizeCentPrice(setup.takeProfit3).toFixed(2)}</span>
+            <span className="text-emerald-400 font-bold">${normalizeCentPrice(setup.takeProfit3, (data as any)?.symbol || 'XAUUSD').toFixed(2)}</span>
           </div>
         </div>
 
