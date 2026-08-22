@@ -1,5 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
 import { marketDataService } from './marketDataService.js';
+import { symbolService } from './symbolService.js';
 
 export interface ChartSnapshot {
   id: string;
@@ -192,8 +193,11 @@ class SnapshotService {
   }): ChartSnapshot {
     const now = new Date();
     const timeFormatted = now.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
-    const rawPrice = snapshotData.currentPrice || marketDataService.getCurrentPrice();
-    const normalizedPrice = rawPrice > 10000 ? Number((rawPrice / 100).toFixed(2)) : Number(rawPrice.toFixed(2));
+    const resolved = symbolService.resolveSymbol(snapshotData.symbol || 'XAUUSD.cent');
+    const isCent = resolved.isCentAccount;
+    const digits = resolved.spec.digits || 2;
+    const rawPrice = snapshotData.currentPrice || marketDataService.getCurrentPrice(resolved.canonicalSymbol);
+    const normalizedPrice = (isCent && rawPrice > 10000) ? Number((rawPrice / 100).toFixed(digits)) : Number(rawPrice.toFixed(digits));
 
     const newSnapshot: ChartSnapshot = {
       id: `snap-${Date.now()}`,
@@ -225,8 +229,13 @@ class SnapshotService {
     currentPriceParam?: number
   ): Promise<MultimodalAnalysisResult> {
     const snapshot = customSnapshot || this.latestSnapshot;
-    const rawPrice = currentPriceParam || snapshot?.currentPrice || marketDataService.getCurrentPrice();
-    const price = rawPrice > 10000 ? Number((rawPrice / 100).toFixed(2)) : Number(rawPrice.toFixed(2));
+    const snapshotSymbol = snapshot?.symbol || 'XAUUSD.cent';
+    const resolved = symbolService.resolveSymbol(snapshotSymbol);
+    const isCent = resolved.isCentAccount;
+    const digits = resolved.spec.digits || 2;
+
+    const rawPrice = currentPriceParam || snapshot?.currentPrice || marketDataService.getCurrentPrice(resolved.canonicalSymbol);
+    const price = (isCent && rawPrice > 10000) ? Number((rawPrice / 100).toFixed(digits)) : Number(rawPrice.toFixed(digits));
 
     const timestamp = snapshot?.timestamp || new Date().toISOString();
     const timeFormatted = snapshot?.timeFormatted || new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
@@ -298,7 +307,7 @@ OUTPUT FORMAT (STRICT JSON SCHEMA ONLY):
     const aiClient = this.getGenAI();
     let result: MultimodalAnalysisResult | null = null;
 
-    const norm = (p: number) => (p > 10000 ? Number((p / 100).toFixed(2)) : Number(p.toFixed(2)));
+    const norm = (p: number) => ((isCent && p > 10000) ? Number((p / 100).toFixed(digits)) : Number(p.toFixed(digits)));
 
     if (aiClient && snapshot?.imageDataUrl && snapshot.imageDataUrl.startsWith('data:image/')) {
       try {
@@ -307,8 +316,8 @@ OUTPUT FORMAT (STRICT JSON SCHEMA ONLY):
           const mimeType = matches[1];
           const base64Data = matches[2];
 
-          const prompt = `Analisis gambar screenshot grafik XAUUSD H1 ini secara visual.
-Harga running saat ini: $${price.toFixed(2)}.
+          const prompt = `Analisis gambar screenshot grafik ${resolved.canonicalSymbol} ini secara visual.
+Harga running saat ini: $${price.toFixed(digits)}.
 Tentukan sinyal utama (BUY/SELL/WAIT), Entry, Take Profit 1, Take Profit 2, Stop Loss, dan alasan analisis visual secara mendalam.`;
 
           const response = await aiClient.models.generateContent({
@@ -345,27 +354,32 @@ Tentukan sinyal utama (BUY/SELL/WAIT), Entry, Take Profit 1, Take Profit 2, Stop
               entryP = price;
             }
 
-            const rawTp1 = parsed.trade_plan_execution_levels?.take_profit_1 ?? parsed.take_profit_1 ?? parsed.execution_plan?.take_profit_1 ?? (signal === 'SELL' ? entryP - 22.50 : entryP + 22.50);
-            const rawTp2 = parsed.trade_plan_execution_levels?.take_profit_2 ?? parsed.take_profit_2 ?? parsed.execution_plan?.take_profit_2 ?? (signal === 'SELL' ? Number(rawTp1) - 18.00 : Number(rawTp1) + 18.00);
-            const rawSl = parsed.trade_plan_execution_levels?.stop_loss ?? parsed.stop_loss ?? parsed.execution_plan?.stop_loss ?? (signal === 'SELL' ? entryP + 12.00 : entryP - 12.00);
+            const defaultAtr = price > 10000 ? price * 0.015 : price < 10 ? price * 0.003 : 14.8;
+            const defaultTp1Offset = defaultAtr * 1.5;
+            const defaultTp2Offset = defaultAtr * 2.8;
+            const defaultSlOffset = defaultAtr * 1.1;
+
+            const rawTp1 = parsed.trade_plan_execution_levels?.take_profit_1 ?? parsed.take_profit_1 ?? parsed.execution_plan?.take_profit_1 ?? (signal === 'SELL' ? entryP - defaultTp1Offset : entryP + defaultTp1Offset);
+            const rawTp2 = parsed.trade_plan_execution_levels?.take_profit_2 ?? parsed.take_profit_2 ?? parsed.execution_plan?.take_profit_2 ?? (signal === 'SELL' ? Number(rawTp1) - defaultTp2Offset : Number(rawTp1) + defaultTp2Offset);
+            const rawSl = parsed.trade_plan_execution_levels?.stop_loss ?? parsed.stop_loss ?? parsed.execution_plan?.stop_loss ?? (signal === 'SELL' ? entryP + defaultSlOffset : entryP - defaultSlOffset);
 
             let tp1 = norm(Number(rawTp1));
             let tp2 = norm(Number(rawTp2));
             let sl = norm(Number(rawSl));
 
-            if (Math.abs(tp1 - entryP) / entryP > 0.10) tp1 = Number((signal === 'SELL' ? entryP - 22.50 : entryP + 22.50).toFixed(2));
-            if (Math.abs(tp2 - entryP) / entryP > 0.15) tp2 = Number((signal === 'SELL' ? tp1 - 18.00 : tp1 + 18.00).toFixed(2));
-            if (Math.abs(sl - entryP) / entryP > 0.10) sl = Number((signal === 'SELL' ? entryP + 12.00 : entryP - 12.00).toFixed(2));
+            if (Math.abs(tp1 - entryP) / entryP > 0.10) tp1 = Number((signal === 'SELL' ? entryP - defaultTp1Offset : entryP + defaultTp1Offset).toFixed(digits));
+            if (Math.abs(tp2 - entryP) / entryP > 0.15) tp2 = Number((signal === 'SELL' ? tp1 - defaultTp2Offset : tp1 + defaultTp2Offset).toFixed(digits));
+            if (Math.abs(sl - entryP) / entryP > 0.10) sl = Number((signal === 'SELL' ? entryP + defaultSlOffset : entryP - defaultSlOffset).toFixed(digits));
 
             // Enforce Direction Invariants
             if (signal === 'BUY') {
-              if (sl >= entryP) sl = Number((entryP - 12.00).toFixed(2));
-              if (tp1 <= entryP) tp1 = Number((entryP + 22.50).toFixed(2));
-              if (tp2 <= tp1) tp2 = Number((tp1 + 18.00).toFixed(2));
+              if (sl >= entryP) sl = Number((entryP - defaultSlOffset).toFixed(digits));
+              if (tp1 <= entryP) tp1 = Number((entryP + defaultTp1Offset).toFixed(digits));
+              if (tp2 <= tp1) tp2 = Number((tp1 + defaultTp2Offset).toFixed(digits));
             } else if (signal === 'SELL') {
-              if (sl <= entryP) sl = Number((entryP + 12.00).toFixed(2));
-              if (tp1 >= entryP) tp1 = Number((entryP - 22.50).toFixed(2));
-              if (tp2 >= tp1) tp2 = Number((tp1 - 18.00).toFixed(2));
+              if (sl <= entryP) sl = Number((entryP + defaultSlOffset).toFixed(digits));
+              if (tp1 >= entryP) tp1 = Number((entryP - defaultTp1Offset).toFixed(digits));
+              if (tp2 >= tp1) tp2 = Number((tp1 - defaultTp2Offset).toFixed(digits));
             }
 
             const riskDist = Math.abs(entryP - sl) || 1;
@@ -376,7 +390,7 @@ Tentukan sinyal utama (BUY/SELL/WAIT), Entry, Take Profit 1, Take Profit 2, Stop
             const confidenceReasons = parsed.market_analysis?.confidence_reasons || parsed.confidence_reasons || [];
             const summaryStr = confidenceReasons.length > 0 
               ? confidenceReasons.join('. ') 
-              : String(parsed.technical_summary || parsed.technical_rationale || parsed.analysis_summary || `Ekstraksi OCR harga running $${entryP.toFixed(2)} berhasil terverifikasi.`);
+              : String(parsed.technical_summary || parsed.technical_rationale || parsed.analysis_summary || `Ekstraksi OCR harga running $${entryP.toFixed(digits)} berhasil terverifikasi.`);
 
             result = {
               signal,

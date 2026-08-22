@@ -247,7 +247,58 @@ export class TradeService {
       };
     }
 
-    // 12. Structural Stop Loss & Take Profit Direction Validation
+    // 12. Pre-Dispatch Price Scale & Structural Boundary Guard
+    const symToValidate = (payload.canonicalSymbol || payload.symbol || 'XAUUSD').trim().toUpperCase();
+    const resolvedSpec = symbolService.resolveSymbol(symToValidate);
+    const canonical = resolvedSpec.canonicalSymbol;
+
+    // A. Symbol Plausible Price Range Check (Prevents e.g. BTCUSD being dispatched on cent/gold scale like 82.23)
+    if (canonical === 'BTCUSD') {
+      if (numEntry < 10000 || numSL < 10000 || numTP1 < 10000) {
+        return {
+          valid: false,
+          statusCode: 400,
+          code: 'PRICE_SCALE_MISMATCH',
+          message: `ORDER DISPATCH REJECTED: BTCUSD execution price scale invalid (Entry: $${numEntry}, SL: $${numSL}, TP1: $${numTP1}). Absolute BTCUSD prices (> 10000.00) required.`,
+          details: { symbol: canonical, entryPrice: numEntry, stopLoss: numSL, takeProfit1: numTP1 },
+        };
+      }
+    } else if (canonical === 'XAUUSD' || canonical === 'XAUUSD.CENT') {
+      if (numEntry < 500 || numEntry > 15000 || numSL < 500 || numTP1 < 500) {
+        return {
+          valid: false,
+          statusCode: 400,
+          code: 'PRICE_SCALE_MISMATCH',
+          message: `ORDER DISPATCH REJECTED: Gold execution price scale invalid (Entry: $${numEntry}, SL: $${numSL}, TP1: $${numTP1}). Standard Gold market prices (500 - 15000) required.`,
+          details: { symbol: canonical, entryPrice: numEntry, stopLoss: numSL, takeProfit1: numTP1 },
+        };
+      }
+    } else if (canonical === 'EURUSD' || canonical === 'GBPUSD') {
+      if (numEntry < 0.4 || numEntry > 3.0 || numSL < 0.4 || numTP1 < 0.4) {
+        return {
+          valid: false,
+          statusCode: 400,
+          code: 'PRICE_SCALE_MISMATCH',
+          message: `ORDER DISPATCH REJECTED: Forex execution price scale invalid (Entry: ${numEntry}, SL: ${numSL}, TP1: ${numTP1}). Standard FX rates required.`,
+          details: { symbol: canonical, entryPrice: numEntry, stopLoss: numSL, takeProfit1: numTP1 },
+        };
+      }
+    }
+
+    // B. Proportional Distance Guard (SL / TP cannot deviate unreasonably from Entry)
+    const slDistRatio = Math.abs(numSL - numEntry) / numEntry;
+    const tp1DistRatio = Math.abs(numTP1 - numEntry) / numEntry;
+    if (slDistRatio > 0.35 || tp1DistRatio > 0.50) {
+      return {
+        valid: false,
+        statusCode: 400,
+        code: 'PRICE_SCALE_MISMATCH',
+        message: `ORDER DISPATCH REJECTED: Stop Loss ($${numSL}) or Take Profit ($${numTP1}) is disproportionate to Entry ($${numEntry}), indicating an invalid price scale.`,
+        details: { symbol: canonical, entryPrice: numEntry, stopLoss: numSL, takeProfit1: numTP1, slDistRatio, tp1DistRatio },
+      };
+    }
+
+    // 13. Structural Stop Loss & Take Profit Direction Validation
     if (side === 'BUY') {
       if (numSL >= numEntry) {
         return {

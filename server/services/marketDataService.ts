@@ -1,4 +1,5 @@
 import { MarketPrice, Candle, TradingSession, MarketStatus, ValidationResult, MarketSnapshot } from '../../src/types.js';
+import { symbolService } from './symbolService.js';
 
 export interface MarketOHLC {
   time: number;
@@ -98,31 +99,56 @@ class MarketDataService {
     }, 3000);
   }
 
-  public async fetchFreshestMarketPrice(): Promise<number> {
+  private symbolPrices: Map<string, number> = new Map([
+    ['XAUUSD', 4470.00],
+    ['XAUUSD.CENT', 4470.00],
+    ['BTCUSD', 77284.50],
+    ['EURUSD', 1.08500],
+    ['GBPUSD', 1.29500],
+    ['USDJPY', 154.200],
+  ]);
+
+  public async fetchFreshestMarketPrice(symbol: string = 'XAUUSD'): Promise<number> {
+    const resolved = symbolService.resolveSymbol(symbol);
+    const canonical = resolved.canonicalSymbol;
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 2000);
-      const res = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT', {
+
+      let binancePair = 'PAXGUSDT';
+      if (canonical === 'BTCUSD') {
+        binancePair = 'BTCUSDT';
+      } else if (canonical === 'EURUSD') {
+        binancePair = 'EURUSDT';
+      } else if (canonical === 'GBPUSD') {
+        binancePair = 'GBPUSDT';
+      }
+
+      const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${binancePair}`, {
         signal: controller.signal,
       });
       clearTimeout(timeoutId);
       if (res.ok) {
         const data: any = await res.json();
         const price = Number(data.price);
-        if (price > 1000 && price < 10000) {
-          const livePrice = Number(price.toFixed(2));
-          this.updatePriceFromProvider(livePrice, 'PUBLIC_GOLD_FEED');
+        if (price > 0 && isFinite(price)) {
+          const livePrice = Number(price.toFixed(resolved.spec.digits || 2));
+          this.symbolPrices.set(canonical, livePrice);
+          if (canonical === (this.cache.liveMarket.symbol || 'XAUUSD')) {
+            this.updatePriceFromProvider(livePrice, `PUBLIC_${canonical}_FEED`);
+          }
           return livePrice;
         }
       }
     } catch {
       // Non-blocking fallback to cached current price
     }
-    return this.cache.currentPrice;
+    return this.symbolPrices.get(canonical) || this.cache.currentPrice;
   }
 
   private async initLivePriceFeed(): Promise<void> {
-    await this.fetchFreshestMarketPrice();
+    await this.fetchFreshestMarketPrice('XAUUSD');
+    await this.fetchFreshestMarketPrice('BTCUSD').catch(() => {});
   }
 
   /**
@@ -208,11 +234,33 @@ class MarketDataService {
 
   // --- SINGLE SOURCE OF TRUTH PUBLIC API METHODS ---
 
-  public getCurrentPrice(): number {
+  public getCurrentPrice(symbol?: string): number {
+    if (symbol) {
+      const resolved = symbolService.resolveSymbol(symbol);
+      const symPrice = this.symbolPrices.get(resolved.canonicalSymbol);
+      if (symPrice !== undefined && symPrice > 0) {
+        return symPrice;
+      }
+    }
     return this.cache.currentPrice;
   }
 
-  public getLiveMarket(): MarketPrice {
+  public getLiveMarket(symbol?: string): MarketPrice {
+    if (symbol) {
+      const resolved = symbolService.resolveSymbol(symbol);
+      const canonical = resolved.canonicalSymbol;
+      const price = this.getCurrentPrice(canonical);
+      const spec = resolved.spec;
+      const defaultSpread = (spec.defaultSpreadPoints || 20) * (spec.point || 0.01);
+      return {
+        ...this.cache.liveMarket,
+        symbol: canonical,
+        price,
+        bid: Number((price - defaultSpread / 2).toFixed(spec.digits || 2)),
+        ask: Number((price + defaultSpread / 2).toFixed(spec.digits || 2)),
+        spread: Number(defaultSpread.toFixed(spec.digits || 2)),
+      };
+    }
     return { ...this.cache.liveMarket };
   }
 
@@ -349,24 +397,28 @@ class MarketDataService {
   }): void {
     const rawPrice = params.price || (params.bid && params.ask ? (params.bid + params.ask) / 2 : undefined);
     if (rawPrice !== undefined) {
-      const normalizedPrice = rawPrice > 10000 ? Number((rawPrice / 100).toFixed(2)) : Number(rawPrice.toFixed(2));
+      const resolved = symbolService.resolveSymbol(params.symbol || 'XAUUSD');
+      const isCent = resolved.isCentAccount;
+      const digits = resolved.spec.digits || 2;
+      const normalizedPrice = (isCent && rawPrice > 10000) ? Number((rawPrice / 100).toFixed(digits)) : Number(rawPrice.toFixed(digits));
+      
       this.cache.providerName = 'MT5';
       this.cache.hasMt5Connected = true;
       this.cache.isAvailable = true;
-      if (params.symbol) {
-        this.cache.liveMarket.symbol = params.symbol.replace(/\.cent|_i|\.a|m$/i, '');
-      }
+      this.cache.liveMarket.symbol = resolved.canonicalSymbol;
+      this.symbolPrices.set(resolved.canonicalSymbol, normalizedPrice);
+
       if (params.spread !== undefined) {
-        this.cache.liveMarket.spread = Number(params.spread.toFixed(2));
+        this.cache.liveMarket.spread = Number(params.spread.toFixed(digits));
       }
       this.syncLatestCandleClose(normalizedPrice);
       if (params.bid !== undefined) {
-        const normBid = params.bid > 10000 ? params.bid / 100 : params.bid;
-        this.cache.liveMarket.bid = Number(normBid.toFixed(2));
+        const normBid = (isCent && params.bid > 10000) ? params.bid / 100 : params.bid;
+        this.cache.liveMarket.bid = Number(normBid.toFixed(digits));
       }
       if (params.ask !== undefined) {
-        const normAsk = params.ask > 10000 ? params.ask / 100 : params.ask;
-        this.cache.liveMarket.ask = Number(normAsk.toFixed(2));
+        const normAsk = (isCent && params.ask > 10000) ? params.ask / 100 : params.ask;
+        this.cache.liveMarket.ask = Number(normAsk.toFixed(digits));
       }
 
       console.log(
@@ -374,6 +426,7 @@ class MarketDataService {
         `[LIVE MARKET SOURCE]\n` +
         `instanceId: ${this.instanceId}\n` +
         `source: MT5\n` +
+        `symbol: ${resolved.canonicalSymbol}\n` +
         `bid: ${this.cache.liveMarket.bid}\n` +
         `ask: ${this.cache.liveMarket.ask}\n` +
         `mid: ${this.cache.currentPrice}\n` +

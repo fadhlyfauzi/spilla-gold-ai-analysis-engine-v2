@@ -10,12 +10,13 @@
  */
 export function normalizeCentPrice(price: number | undefined | null, symbol: string = 'XAUUSD.cent'): number {
   if (price === undefined || price === null || isNaN(price)) return 0;
-  const isCentSymbol = symbol ? symbol.toLowerCase().includes('.cent') : false;
+  const sym = (symbol || '').trim().toLowerCase();
+  const isCentSymbol = sym.includes('.cent') || sym.endsWith('.c') || sym.includes('cent');
   
-  if ((isCentSymbol && price > 10000) || price > 10000) {
+  if (isCentSymbol && price > 10000) {
     return Number((price / 100).toFixed(2));
   }
-  return Number(price.toFixed(2));
+  return Number(price);
 }
 
 /**
@@ -36,8 +37,13 @@ export function formatSymbolLabel(symbol: string = 'XAUUSD.cent'): string {
  */
 export function formatPriceDisplay(price: number | undefined | null, symbol: string = 'XAUUSD.cent'): string {
   const normalized = normalizeCentPrice(price, symbol);
+  const sym = (symbol || '').toUpperCase();
+  let digits = 2;
+  if (sym.includes('EUR') || sym.includes('GBP')) digits = 5;
+  else if (sym.includes('JPY')) digits = 3;
+
   return normalized.toLocaleString('en-US', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
   });
 }

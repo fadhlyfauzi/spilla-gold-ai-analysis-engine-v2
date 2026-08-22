@@ -1,6 +1,7 @@
 import { GoogleGenAI } from '@google/genai';
 import { Mt5Payload, Mt5AiAnalysisResult, Candle } from '../../src/types.js';
 import { marketDataService } from './marketDataService.js';
+import { symbolService } from './symbolService.js';
 import { db } from '../db/database.js';
 
 class Mt5AiService {
@@ -50,28 +51,35 @@ class Mt5AiService {
    */
   public async processMt5Payload(payload: Partial<Mt5Payload>): Promise<{ mt5Data: Mt5Payload; analysis: Mt5AiAnalysisResult }> {
     // Merge payload with defaults using live market price
-    const livePrice = marketDataService.getCurrentPrice();
-    const symbol = payload.symbol || 'XAUUSD.cent';
+    const rawSymbol = payload.symbol || 'XAUUSD.cent';
+    const resolved = symbolService.resolveSymbol(rawSymbol);
+    const isCent = resolved.isCentAccount;
+    const digits = resolved.spec.digits || 2;
+
+    const livePrice = marketDataService.getCurrentPrice(resolved.canonicalSymbol);
+    const symbol = rawSymbol;
     const timeframe = payload.timeframe || 'H1';
     const extractedPrice = payload.current_price !== undefined ? Number(payload.current_price) : (payload.price !== undefined ? Number(payload.price) : (payload.candles && payload.candles[0]?.close !== undefined ? Number(payload.candles[0].close) : (payload.bid && payload.ask ? (Number(payload.bid) + Number(payload.ask)) / 2 : livePrice)));
     const rawPrice = Number(extractedPrice || livePrice || 0);
-    const currentPrice = rawPrice > 10000 ? Number((rawPrice / 100).toFixed(2)) : Number(rawPrice.toFixed(2));
+    const currentPrice = (isCent && rawPrice > 10000) ? Number((rawPrice / 100).toFixed(digits)) : Number(rawPrice.toFixed(digits));
 
     const normalize = (val: number | undefined, defaultVal: number) => {
       const v = val !== undefined ? Number(val) : defaultVal;
-      return v > 10000 ? Number((v / 100).toFixed(2)) : Number(v.toFixed(2));
+      return (isCent && v > 10000) ? Number((v / 100).toFixed(digits)) : Number(v.toFixed(digits));
     };
 
+    const atrOffset = currentPrice > 10000 ? currentPrice * 0.012 : currentPrice < 10 ? currentPrice * 0.003 : 14.80;
+
     const defaultIndicators = {
-      ema_20: Number((currentPrice - 28.45).toFixed(2)),
-      ema_50: Number((currentPrice - 27.93).toFixed(2)),
-      pivot: Number((currentPrice + 9.45).toFixed(2)),
-      r1: Number((currentPrice + 18.90).toFixed(2)),
-      r2: Number((currentPrice + 37.80).toFixed(2)),
-      r3: Number((currentPrice + 47.25).toFixed(2)),
-      s1: Number((currentPrice - 9.45).toFixed(2)),
-      s2: Number((currentPrice - 18.90).toFixed(2)),
-      s3: Number((currentPrice - 37.80).toFixed(2)),
+      ema_20: Number((currentPrice - atrOffset * 0.8).toFixed(digits)),
+      ema_50: Number((currentPrice - atrOffset * 1.2).toFixed(digits)),
+      pivot: Number((currentPrice + atrOffset * 0.2).toFixed(digits)),
+      r1: Number((currentPrice + atrOffset * 1.2).toFixed(digits)),
+      r2: Number((currentPrice + atrOffset * 2.2).toFixed(digits)),
+      r3: Number((currentPrice + atrOffset * 3.2).toFixed(digits)),
+      s1: Number((currentPrice - atrOffset * 1.2).toFixed(digits)),
+      s2: Number((currentPrice - atrOffset * 2.2).toFixed(digits)),
+      s3: Number((currentPrice - atrOffset * 3.2).toFixed(digits)),
       volume: payload.indicators?.volume || 2490,
     };
 
@@ -278,10 +286,14 @@ OUTPUT FORMAT (STRICT JSON ONLY):
     else if (confidence <= 20) signal = 'STRONG SELL';
     else signal = 'NEUTRAL';
 
-    const stopLoss = Number((ind.s1 || price - 12.0).toFixed(2));
-    const takeProfit1 = Number((ind.r1 || price + 18.0).toFixed(2));
-    const risk = Math.max(1, price - stopLoss);
-    const reward = Math.max(1, takeProfit1 - price);
+    const resolved = symbolService.resolveSymbol(mt5Data.symbol);
+    const digits = resolved.spec.digits || 2;
+    const atrOffset = price > 10000 ? price * 0.012 : price < 10 ? price * 0.003 : 14.80;
+
+    const stopLoss = Number((ind.s1 || (signal.includes('SELL') ? price + atrOffset : price - atrOffset)).toFixed(digits));
+    const takeProfit1 = Number((ind.r1 || (signal.includes('SELL') ? price - atrOffset * 1.5 : price + atrOffset * 1.5)).toFixed(digits));
+    const risk = Math.max(0.0001, Math.abs(price - stopLoss));
+    const reward = Math.max(0.0001, Math.abs(takeProfit1 - price));
     const rrRatio = `1:${(reward / risk).toFixed(2)}`;
 
     return {
@@ -293,12 +305,12 @@ OUTPUT FORMAT (STRICT JSON ONLY):
       trade_quality_score: tradeQuality,
       signal,
       execution_plan: {
-        entry_price: Number(price.toFixed(2)),
+        entry_price: Number(price.toFixed(digits)),
         stop_loss: stopLoss,
         take_profit_1: takeProfit1,
         risk_reward_ratio: rrRatio,
       },
-      analysis_summary: `SPILLA Quantitative Workstation Analysis for ${mt5Data.symbol} (${mt5Data.timeframe}): Price holding at $${price.toFixed(2)} relative to EMA20 ($${ind.ema_20}) and Daily Pivot ($${ind.pivot}). Market setup demonstrates high multi-factor confluence with ${rrRatio} Risk-Reward efficiency.`,
+      analysis_summary: `SPILLA Quantitative Workstation Analysis for ${resolved.canonicalSymbol} (${mt5Data.timeframe}): Price holding at $${price.toFixed(digits)} relative to EMA20 ($${ind.ema_20}) and Daily Pivot ($${ind.pivot}). Market setup demonstrates high multi-factor confluence with ${rrRatio} Risk-Reward efficiency.`,
     };
   }
 
